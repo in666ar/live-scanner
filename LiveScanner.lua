@@ -1,10 +1,19 @@
--- ============================================
--- FULL LIVE SCANNER v11.0 (ORIGINAL GUI)
--- FULL BIDIRECTIONAL: FireServer + InvokeServer + require + DescendantAdded
--- BACKEND PATCHED: Auto-ON, Anti-Spam, COPY ALL, Silent Reset, All Toggles LIVE
--- @in666ar
--- ============================================
+--[[
+    Script Name : LiveScanner_v11_patched.lua
+    Type        : Single-file Script
+    Target Exec : Delta
+    Version     : Patch v1.0
+    Function    : Live scanner bidirectional (FireServer/InvokeServer/OnClientEvent/require/SetAttribute),
+                  GUI 6 tab (LOG, CFG, INFO, HOOK, BTN, GAME), auto-on, anti-spam, copy all, silent reset
+    Changelog   : fix vararg '...' di dalam pcall closure (script gagal compile), forward declaration
+                  renderLog/setupBackpack, dispatcher hook di-refresh tiap execute, setnamecallmethod restore,
+                  filter refresh + kategori PLAYER/MODEL, fmt typeof, backpack watch aman saat execute ulang,
+                  fallback clipboard, boot section dibungkus pcall. fitur/logika lain tidak diubah.
+]]
 
+-- ============================================================
+-- SECTION: SERVICES & CLEANUP
+-- ============================================================
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -12,7 +21,7 @@ local UIS = game:GetService("UserInputService")
 local Stats = game:GetService("Stats")
 local lp = Players.LocalPlayer
 
--- ============ CLEANUP ============
+-- cleanup guard: hapus instance lama kalau script di-execute ulang
 if _G._LiveScanner_v10_Cleanup then pcall(_G._LiveScanner_v10_Cleanup) end
 for _, g in ipairs(game:GetService("CoreGui"):GetChildren()) do
     if g.Name == "FullLiveScan" then g:Destroy() end
@@ -21,7 +30,9 @@ for _, g in ipairs(lp:WaitForChild("PlayerGui"):GetChildren()) do
     if g.Name == "FullLiveScan" then g:Destroy() end
 end
 
--- ============ CONFIG ============
+-- ============================================================
+-- SECTION: CONFIG
+-- ============================================================
 local CFG = {
     ScanInterval = 1.5, RenderInterval = 1.5, InfoInterval = 5, HookInterval = 5, ButtonScanInterval = 2,
     MaxLines = 25, MaxBuffer = 400, Radius = 100,
@@ -33,7 +44,7 @@ local CFG = {
     TrackPosition = false, TrackPlayers = true,
     TrackHealth = true, TrackNetwork = false, TrackToolEquip = true, TrackButtons = true,
 
-    -- OUTBOUND (client -> server) — NEW TIER S
+    -- OUTBOUND (client -> server)
     TrackOutbound = true,       -- FireServer hook
     TrackGlobalAttr = false,    -- SetAttribute hook on all instances (noisy, opt-in)
     TrackRequires = true,       -- require() hook
@@ -86,7 +97,12 @@ local CFG = {
 
 local State = {running = true, paused = false, destroyed = false}
 
--- ============ CONNECTION TRACKER ============
+-- forward declaration (dipakai event handler sebelum fungsinya didefinisikan)
+local renderLog, setupBackpack
+
+-- ============================================================
+-- SECTION: CONNECTION TRACKER
+-- ============================================================
 local _conns = {}
 local function trackConn(c) table.insert(_conns, c); return c end
 local function disconnectAll()
@@ -94,7 +110,9 @@ local function disconnectAll()
     _conns = {}
 end
 
--- ============ 📱 AUTO-FIT ============
+-- ============================================================
+-- SECTION: AUTO-FIT LAYAR
+-- ============================================================
 local VIEW = workspace.CurrentCamera.ViewportSize
 local SCALE_W = VIEW.X / 720
 local SCALE_H = VIEW.Y / 1280
@@ -120,14 +138,17 @@ if startY + FRAME_H > VIEW.Y - 10 then
     startY = math.max(10, VIEW.Y - FRAME_H - 10)
 end
 
--- ============ LOG ============
+-- ============================================================
+-- SECTION: LOG BUFFER
+-- ============================================================
 local Logs = {entries = {}, totalCount = 0, categoryCount = {}}
 
 local function pushLog(text, color, category)
     if State.destroyed then return end
+    category = category or "SYS" -- patch: default kategori biar categoryCount tidak error
     local entry = {
         text = "[" .. os.date("%H:%M:%S") .. "] " .. text,
-        raw = text, color = color or Color3.fromRGB(200,200,200), category = category or "SYS", time = os.clock(),
+        raw = text, color = color or Color3.fromRGB(200,200,200), category = category, time = os.clock(),
     }
     table.insert(Logs.entries, entry)
     if #Logs.entries > CFG.MaxBuffer then table.remove(Logs.entries, 1) end
@@ -135,7 +156,9 @@ local function pushLog(text, color, category)
     Logs.categoryCount[category] = (Logs.categoryCount[category] or 0) + 1
 end
 
--- ============ HELPERS ============
+-- ============================================================
+-- SECTION: HELPERS
+-- ============================================================
 local function truncate(s, max)
     s = tostring(s)
     if #s > max then return string.sub(s, 1, max) .. "...(+" .. (#s - max) .. ")" end
@@ -145,7 +168,7 @@ end
 local function fmt(v, depth)
     depth = depth or 0
     if depth > 3 then return "..." end
-    if type(v) == "Instance" then return v.Name end
+    if typeof(v) == "Instance" then return v.Name end -- patch: type -> typeof (type() tidak pernah return "Instance")
     if type(v) == "table" then
         local p = {}
         for k, val in pairs(v) do table.insert(p, tostring(k).."="..fmt(val, depth + 1)) end
@@ -185,6 +208,7 @@ local function numAlmostEqual(a, b, tol)
     return math.abs(a - b) < tol
 end
 
+-- addLog: tambah penanda alert kalau kena keyword
 local function addLog(text, color, category)
     if State.destroyed then return end
     if CFG.AlertMode then
@@ -197,7 +221,9 @@ local function addLog(text, color, category)
     pushLog(text, color, category or "SYS")
 end
 
--- ============ GUI ============
+-- ============================================================
+-- SECTION: GUI - FRAME & HEADER
+-- ============================================================
 local C = {
     Bg          = Color3.fromRGB(16, 18, 24),
     BgTop       = Color3.fromRGB(26, 30, 40),
@@ -329,6 +355,7 @@ closeBtn.MouseLeave:Connect(function() closeBtn.BackgroundColor3 = C.Danger end)
 collapse.MouseEnter:Connect(function() collapse.BackgroundColor3 = Color3.fromRGB(48, 54, 70) end)
 collapse.MouseLeave:Connect(function() collapse.BackgroundColor3 = C.RowBgAlt end)
 
+-- fullKill: matikan semua loop, koneksi, dan GUI
 local function fullKill()
     State.destroyed = true
     State.running = false
@@ -344,7 +371,9 @@ end
 _G._LiveScanner_v10_Cleanup = fullKill
 closeBtn.MouseButton1Click:Connect(fullKill)
 
--- Tab bar
+-- ============================================================
+-- SECTION: GUI - TAB BAR
+-- ============================================================
 local tabBar = Instance.new("Frame")
 tabBar.Size = UDim2.new(1, -10, 0, 26)
 tabBar.Position = UDim2.new(0, 5, 0, 34)
@@ -380,7 +409,9 @@ for i, t in ipairs(tabs) do
     tabButtons[t.name] = btn
 end
 
--- Search + Filter
+-- ============================================================
+-- SECTION: GUI - SEARCH & FILTER
+-- ============================================================
 local searchFrame = Instance.new("Frame")
 searchFrame.Size = UDim2.new(1, -10, 0, 26)
 searchFrame.Position = UDim2.new(0, 5, 0, 64)
@@ -416,9 +447,10 @@ filterBtn.AutoButtonColor = false
 filterBtn.Parent = searchFrame
 Instance.new("UICorner", filterBtn).CornerRadius = UDim.new(0, 5)
 
+-- patch: tambah PLAYER & MODEL (kategori ini dipakai addLog tapi sebelumnya tidak bisa difilter)
 local filterCycle = {
     "ALL","REMOTE","OUT","RF","ATTR","STAT","HEALTH","SPEED","CURRENCY","PATTERN",
-    "MODULE","EVENT","INV","TOOL","BTN","NET","ANOMALY","SYS"
+    "MODULE","EVENT","INV","TOOL","BTN","NET","ANOMALY","PLAYER","MODEL","SYS"
 }
 local filterIdx = 1
 local searchText = ""
@@ -431,9 +463,12 @@ filterBtn.MouseButton1Click:Connect(function()
     filterIdx = filterIdx + 1
     if filterIdx > #filterCycle then filterIdx = 1 end
     filterBtn.Text = filterCycle[filterIdx]
+    renderLog() -- patch: refresh langsung saat filter diganti
 end)
 
--- Content
+-- ============================================================
+-- SECTION: GUI - CONTENT (scroll per tab)
+-- ============================================================
 local content = Instance.new("Frame")
 content.Size = UDim2.new(1, -10, 1, -142)
 content.Position = UDim2.new(0, 5, 0, 94)
@@ -462,7 +497,9 @@ local hookFrame = makeScroll(); hookFrame.Visible = false
 local btnFrame = makeScroll(); btnFrame.Visible = false
 local gameFrame = makeScroll(); gameFrame.Visible = false
 
--- Fixed Footer
+-- ============================================================
+-- SECTION: GUI - FOOTER (PAUSE / CLEAR / COPY ALL)
+-- ============================================================
 local BTN_GAP = 5
 local BTN_TOTAL_W = FRAME_W - 10
 local BTN_W = math.floor((BTN_TOTAL_W - BTN_GAP * 2) / 3)
@@ -507,7 +544,9 @@ btnCopy.AutoButtonColor = false
 btnCopy.Parent = frame
 Instance.new("UICorner", btnCopy).CornerRadius = UDim.new(0, 6)
 
--- Draggable
+-- ============================================================
+-- SECTION: GUI - DRAG & COLLAPSE
+-- ============================================================
 local dragging, dragStart, startPos
 header.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -536,8 +575,10 @@ collapse.MouseButton1Click:Connect(function()
     end
 end)
 
--- RENDER LOG
-local function renderLog()
+-- ============================================================
+-- SECTION: RENDER - LOG
+-- ============================================================
+function renderLog() -- assign ke forward declaration
     if State.destroyed then return end
     for _, c in ipairs(scroll:GetChildren()) do
         if c:IsA("TextLabel") then c:Destroy() end
@@ -570,8 +611,10 @@ local function renderLog()
     end
 end
 
--- TOGGLE
-local toggleRefs = {} -- for snapshot reset on toggle
+-- ============================================================
+-- SECTION: CFG TAB (toggle)
+-- ============================================================
+local toggleRefs = {}
 local function makeToggle(name, key, parent, onChanged)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, -4, 0, 24)
@@ -614,7 +657,6 @@ local function makeToggle(name, key, parent, onChanged)
     toggleRefs[key] = btn
 end
 
--- Snapshot reset helpers
 local resetSnapshotFuncs = {}
 
 makeToggle("Player Attributes", "TrackAttrs", cfgFrame, function(v)
@@ -642,7 +684,9 @@ makeToggle("Currency Radar", "CurrencyRadar", cfgFrame)
 makeToggle("SpeedHack Detect", "SpeedHackDetect", cfgFrame)
 makeToggle("Pattern Detect", "PatternDetect", cfgFrame)
 
--- INFO
+-- ============================================================
+-- SECTION: RENDER - INFO
+-- ============================================================
 local function renderInfo()
     if State.destroyed then return end
     for _, c in ipairs(infoFrame:GetChildren()) do
@@ -685,7 +729,9 @@ local function renderInfo()
     end
 end
 
--- GAME INFO
+-- ============================================================
+-- SECTION: RENDER - GAME
+-- ============================================================
 local function renderGame()
     if State.destroyed then return end
     for _, c in ipairs(gameFrame:GetChildren()) do
@@ -722,7 +768,9 @@ local function renderGame()
     end
 end
 
--- HOOK TAB
+-- ============================================================
+-- SECTION: HOOK STATE & RENDER - HOOK TAB
+-- ============================================================
 _G._LS_hooks = _G._LS_hooks or {}
 local hookedRemotes = _G._LS_hooks
 local remoteStats = {}
@@ -738,8 +786,10 @@ local function renderHook()
     end
     local events, functions = {}, {}
     for r in pairs(hookedRemotes) do
-        if r:IsA("RemoteEvent") then table.insert(events, r.Name)
-        elseif r:IsA("RemoteFunction") then table.insert(functions, r.Name) end
+        if typeof(r) == "Instance" then -- patch: guard biar aman kalau key bukan Instance
+            if r:IsA("RemoteEvent") then table.insert(events, r.Name)
+            elseif r:IsA("RemoteFunction") then table.insert(functions, r.Name) end
+        end
     end
     table.sort(events)
     table.sort(functions)
@@ -811,7 +861,7 @@ local function renderHook()
         Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 3)
     end
 
-    -- Modules loaded
+    -- modules loaded
     local hdrMod = Instance.new("TextLabel")
     hdrMod.Size = UDim2.new(1, -4, 0, math.max(12, FONT_SIZE + 1))
     hdrMod.BackgroundTransparency = 1
@@ -841,7 +891,9 @@ local function renderHook()
     end
 end
 
--- ============ HOOK: INBOUND RemoteEvent ============
+-- ============================================================
+-- SECTION: HOOK - INBOUND RemoteEvent (OnClientEvent)
+-- ============================================================
 local function hookRemoteEvent(r)
     if hookedRemotes[r] then return end
     if isIgnoredName(r.Name, CFG.IgnoreRemotes) or isIgnoredName(r.Name, CFG.IgnorePatterns) then
@@ -861,6 +913,7 @@ local function hookRemoteEvent(r)
         local rs = remoteStats[r]
         rs.count = rs.count + 1
 
+        -- hitung frekuensi (anti-spam)
         local now = os.clock()
         rs.lastHit = now
         table.insert(rs.timestamps, now)
@@ -883,6 +936,7 @@ local function hookRemoteEvent(r)
         for _, a in ipairs(args) do argStr = argStr .. "|" .. fmt(a) end
         argStr = truncate(argStr, CFG.MaxArgLen)
 
+        -- dedupe argumen sama dalam window
         if CFG.DedupeRemote then
             if remoteLastArgs[r] == argStr and (now - (remoteLastTime[r] or 0)) < CFG.DedupeWindow then
                 rs.skipped = (rs.skipped or 0) + 1
@@ -896,7 +950,7 @@ local function hookRemoteEvent(r)
     end)
     hookedRemotes[r] = conn
 
-    -- Pattern detect on new remote
+    -- pattern detect pada remote baru
     if CFG.PatternDetect then
         local low = string.lower(r.Name)
         for _, p in ipairs(CFG.PatternKeywords) do
@@ -908,7 +962,9 @@ local function hookRemoteEvent(r)
     end
 end
 
--- ============ HOOK: OUTBOUND FireServer ============
+-- ============================================================
+-- SECTION: HOOK - OUTBOUND FireServer / InvokeServer
+-- ============================================================
 local function getOutStats(r)
     if not outStats[r] then
         outStats[r] = {count = 0, timestamps = {}, silent = false, lastHit = 0, lastArgs = nil, lastTime = 0}
@@ -952,7 +1008,6 @@ local function onFireServer(r, args)
     addLog("⬆ " .. r.Name .. " | " .. argStr, Color3.fromRGB(255, 200, 50), "OUT")
 end
 
--- ============ HOOK: RF InvokeServer ============
 local function onInvokeServer(r, args)
     if not CFG.TrackRemoteFunctions or State.paused or State.destroyed then return end
     if isIgnoredName(r.Name, CFG.IgnoreRemotes) or isIgnoredName(r.Name, CFG.IgnorePatterns) then return end
@@ -970,66 +1025,85 @@ local function hookRemoteFunction(r)
     hookedRemotes[r] = "FUNCTION"
 end
 
--- ============ UNIFIED NAMECALL HOOK ============
+-- ============================================================
+-- SECTION: UNIFIED NAMECALL HOOK (satu-satunya tempat hook namecall)
+-- ============================================================
 local _lastSetAttrLog = 0
 local function installNamecallHook()
+    -- patch: dispatcher di-refresh tiap execute. hook asli cuma dipasang sekali (guard di bawah),
+    -- jadi tanpa ini hook lama masih nunjuk ke State/GUI lama yang sudah destroyed.
+    _G._LS_onNamecall = function(self, method, args)
+        if typeof(self) ~= "Instance" then return end
+
+        if method == "FireServer" and self:IsA("RemoteEvent") then
+            onFireServer(self, args)
+        elseif method == "InvokeServer" and self:IsA("RemoteFunction") then
+            onInvokeServer(self, args)
+        elseif method == "SetAttribute" and CFG.TrackGlobalAttr and not State.paused then
+            if self ~= lp and not self:IsDescendantOf(lp) then
+                local now = os.clock()
+                if now - _lastSetAttrLog > CFG.SetAttrCooldown then
+                    _lastSetAttrLog = now
+                    pcall(function()
+                        addLog("🏷 " .. self:GetFullName() .. "." .. tostring(args[1]) .. " = " .. fmt(args[2]), C.Accent, "ATTR")
+                    end)
+                end
+            end
+        end
+    end
+
     if not (hookmetamethod and getnamecallmethod) then
         addLog("⚠️ hookmetamethod not available", C.Danger, "SYS")
         return
     end
-    if _G._LS_NamecallInstalled then return end
+    if _G._LS_NamecallInstalled then return end -- guard anti double-hook
     _G._LS_NamecallInstalled = true
 
     local oldNamecall
     oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
 
-        if typeof(self) == "Instance" then
-            -- OUT: FireServer
-            if method == "FireServer" and self:IsA("RemoteEvent") then
-                local ok, err = pcall(function() onFireServer(self, {...}) end)
-                if not ok then end
-            -- OUT: InvokeServer
-            elseif method == "InvokeServer" and self:IsA("RemoteFunction") then
-                pcall(function() onInvokeServer(self, {...}) end)
-            -- Global SetAttribute (opt-in)
-            elseif method == "SetAttribute" and CFG.TrackGlobalAttr and not State.paused then
-                if self ~= lp and not self:IsDescendantOf(lp) then
-                    local now = os.clock()
-                    if now - _lastSetAttrLog > CFG.SetAttrCooldown then
-                        _lastSetAttrLog = now
-                        pcall(function()
-                            local attrName, attrVal = ...
-                            addLog("🏷 " .. self:GetFullName() .. "." .. tostring(attrName) .. " = " .. fmt(attrVal), C.Accent, "ATTR")
-                        end)
-                    end
-                end
+        -- patch: '...' diambil di fungsi vararg ini (bukan di dalam closure pcall, itu bikin compile error)
+        if method == "FireServer" or method == "InvokeServer" or method == "SetAttribute" then
+            local dispatch = _G._LS_onNamecall
+            if dispatch then
+                local args = {...}
+                pcall(dispatch, self, method, args)
             end
+            -- patch: dispatcher memanggil method lain (IsA dll) yang menimpa namecall method, kembalikan
+            if setnamecallmethod then pcall(setnamecallmethod, method) end
         end
 
         return oldNamecall(self, ...)
     end)
 end
 
--- ============ REQUIRE HOOK ============
+-- ============================================================
+-- SECTION: REQUIRE HOOK (satu-satunya tempat hook require)
+-- ============================================================
 local function installRequireHook()
+    local env = getgenv and getgenv() or _G
+
+    -- patch: dispatcher di-refresh tiap execute (flag _LS_require_hooked tetap dipakai)
+    env._LS_onRequire = function(m)
+        if CFG.TrackRequires and not State.paused and not State.destroyed then
+            if typeof(m) == "Instance" then
+                local path = m:GetFullName()
+                if path and #path < 120 and not seenModules[path] then
+                    seenModules[path] = true
+                    addLog("📦 require: " .. path, Color3.fromRGB(180, 130, 255), "MODULE")
+                end
+            end
+        end
+    end
+
     local ok, err = pcall(function()
-        local env = getgenv and getgenv() or _G
-        if env._LS_require_hooked then return end
+        if env._LS_require_hooked then return end -- guard anti double-hook
         env._LS_require_hooked = true
         local oldRequire = env.require or require
         env.require = function(m)
-            if CFG.TrackRequires and not State.paused and not State.destroyed then
-                pcall(function()
-                    if typeof(m) == "Instance" then
-                        local path = m:GetFullName()
-                        if path and #path < 120 and not seenModules[path] then
-                            seenModules[path] = true
-                            addLog("📦 require: " .. path, Color3.fromRGB(180, 130, 255), "MODULE")
-                        end
-                    end
-                end)
-            end
+            local d = env._LS_onRequire
+            if d then pcall(d, m) end
             return oldRequire(m)
         end
     end)
@@ -1038,7 +1112,9 @@ local function installRequireHook()
     end
 end
 
--- ============ INITIAL SCAN of remotes ============
+-- ============================================================
+-- SECTION: REMOTE SCAN (initial + dynamic)
+-- ============================================================
 local function scanRemotes(parent, depth)
     if depth > 6 then return end
     for _, obj in ipairs(parent:GetChildren()) do
@@ -1049,7 +1125,6 @@ local function scanRemotes(parent, depth)
     end
 end
 
--- ============ DYNAMIC REMOTE DETECTION ============
 local function setupDynamicRemoteWatch()
     trackConn(RS.DescendantAdded:Connect(function(obj)
         if State.destroyed then return end
@@ -1063,7 +1138,9 @@ local function setupDynamicRemoteWatch()
     end))
 end
 
--- ============ BUTTON SCANNER ============
+-- ============================================================
+-- SECTION: BUTTON SCANNER & RENDER - BTN TAB
+-- ============================================================
 local function scanButtons()
     local found = {}
     local pg = lp:FindFirstChild("PlayerGui")
@@ -1080,6 +1157,7 @@ local function scanButtons()
                 local lowName = string.lower(name)
                 local lowText = string.lower(text)
 
+                -- blacklist
                 local isBlacklisted = false
                 for _, bl in ipairs(CFG.ButtonBlacklist) do
                     if string.find(lowName, bl, 1, true) or string.find(lowText, bl, 1, true) then
@@ -1088,6 +1166,7 @@ local function scanButtons()
                 end
 
                 if not isBlacklisted then
+                    -- keyword match
                     local isTracked = false
                     for _, kw in ipairs(CFG.ButtonKeywords) do
                         if string.find(lowName, kw, 1, true) or string.find(lowText, kw, 1, true) then
@@ -1156,13 +1235,17 @@ local function renderButtons()
     end
 end
 
--- ============ SNAPSHOT ============
+-- ============================================================
+-- SECTION: SNAPSHOT STATE
+-- ============================================================
 local lastSnapshot = {attrs = {}, stats = {}, nearby = {}, inventory = {}, walkspeed = nil, jumppower = nil, seat = nil, position = nil, health = nil, ping = nil, tool = nil, currency = {}}
 local lastSpeedWarn = 0
 local seenModelNames = {}
 local modelLogBudget = 0
 
--- ============ CORE SCAN ============
+-- ============================================================
+-- SECTION: CORE SCAN
+-- ============================================================
 local function scanOnce()
     if State.destroyed or State.paused then return end
     if not gui or not gui.Parent then fullKill(); return end
@@ -1170,7 +1253,7 @@ local function scanOnce()
     local char = lp.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
 
-    -- Attrs (LocalPlayer)
+    -- attributes (LocalPlayer)
     if CFG.TrackAttrs then
         for k, v in pairs(lp:GetAttributes()) do
             if isIgnoredName(k, CFG.IgnoreAttrPatterns) then
@@ -1195,7 +1278,7 @@ local function scanOnce()
         end
     end
 
-    -- Leaderstats
+    -- leaderstats
     if CFG.TrackStats then
         local ls = lp:FindFirstChild("leaderstats")
         if ls then
@@ -1211,7 +1294,7 @@ local function scanOnce()
         end
     end
 
-    -- Currency Radar
+    -- currency radar
     if CFG.CurrencyRadar then
         local ls = lp:FindFirstChild("leaderstats")
         if ls then
@@ -1225,7 +1308,7 @@ local function scanOnce()
                 end
             end
         end
-        -- Also attrs currency
+        -- currency di attributes
         for k, v in pairs(lp:GetAttributes()) do
             if hasKwWord(k, CFG.CurrencyKeywords) and type(v) == "number" then
                 local old = lastSnapshot.currency["attr_"..k]
@@ -1237,7 +1320,7 @@ local function scanOnce()
         end
     end
 
-    -- Humanoid
+    -- humanoid
     if hum then
         if CFG.TrackHumanoid and lastSnapshot.walkspeed ~= hum.WalkSpeed then
             if lastSnapshot.walkspeed ~= nil and math.abs(hum.WalkSpeed - lastSnapshot.walkspeed) >= 1 then
@@ -1258,7 +1341,7 @@ local function scanOnce()
             end
         end
 
-        -- SpeedHack (throttled)
+        -- speedhack detect (throttled)
         if CFG.SpeedHackDetect and hum.WalkSpeed > CFG.MaxSpeedNormal then
             local now = os.clock()
             if now - lastSpeedWarn > CFG.SpeedWarnCooldown then
@@ -1268,7 +1351,7 @@ local function scanOnce()
         end
     end
 
-    -- Tool Equip
+    -- tool equip
     if CFG.TrackToolEquip then
         local tool = char and char:FindFirstChildOfClass("Tool")
         local tname = tool and tool.Name or nil
@@ -1280,7 +1363,7 @@ local function scanOnce()
         end
     end
 
-    -- Position tracking (teleport detection)
+    -- position tracking (teleport detection)
     if CFG.TrackPosition and char then
         local hrp = char:FindFirstChild("HumanoidRootPart")
         if hrp then
@@ -1295,7 +1378,7 @@ local function scanOnce()
         end
     end
 
-    -- Network / Ping
+    -- network / ping
     if CFG.TrackNetwork then
         local pingItem = Stats.Network.ServerStatsItem and Stats.Network.ServerStatsItem["Data Ping"]
         if pingItem then
@@ -1310,7 +1393,7 @@ local function scanOnce()
         end
     end
 
-    -- Nearby players (TrackPlayers)
+    -- nearby players
     if CFG.TrackPlayers then
         local near = {}
         for _, p in ipairs(Players:GetPlayers()) do
@@ -1339,7 +1422,33 @@ local function scanOnce()
     end
 end
 
--- ============ PLAYER EVENTS ============
+-- ============================================================
+-- SECTION: BACKPACK WATCH
+-- ============================================================
+-- token sesi: attribute _LS_watched dulu cuma boolean sehingga setelah execute ulang
+-- backpack tidak pernah di-watch lagi (koneksi lama sudah di-disconnect)
+local SESSION_TOKEN = tostring(os.clock()) .. "-" .. tostring(math.random(100000, 999999))
+
+function setupBackpack() -- assign ke forward declaration
+    local bp = lp:FindFirstChildOfClass("Backpack")
+    if not bp then return end
+    if bp:GetAttribute("_LS_watched") == SESSION_TOKEN then return end
+    bp:SetAttribute("_LS_watched", SESSION_TOKEN)
+    trackConn(bp.ChildAdded:Connect(function(c)
+        if CFG.TrackBackpack and not State.paused and not State.destroyed then
+            addLog("🎒 +Item: " .. c.Name .. " (" .. c.ClassName .. ")", C.Success, "INV")
+        end
+    end))
+    trackConn(bp.ChildRemoved:Connect(function(c)
+        if CFG.TrackBackpack and not State.paused and not State.destroyed then
+            addLog("🎒 -Item: " .. c.Name, C.Warning, "INV")
+        end
+    end))
+end
+
+-- ============================================================
+-- SECTION: PLAYER EVENTS
+-- ============================================================
 local function setupPlayerEvents()
     trackConn(Players.PlayerAdded:Connect(function(p)
         if CFG.TrackPlayerEvents and not State.paused and not State.destroyed then
@@ -1356,29 +1465,13 @@ local function setupPlayerEvents()
             addLog("🎮 Character spawned: " .. c.Name, C.Accent, "EVENT")
         end
         task.wait(1)
-        setupBackpack()
+        if not State.destroyed then setupBackpack() end
     end))
 end
 
--- ============ BACKPACK WATCH ============
-local function setupBackpack()
-    local bp = lp:FindFirstChildOfClass("Backpack")
-    if not bp then return end
-    if bp:GetAttribute("_LS_watched") then return end
-    bp:SetAttribute("_LS_watched", true)
-    trackConn(bp.ChildAdded:Connect(function(c)
-        if CFG.TrackBackpack and not State.paused and not State.destroyed then
-            addLog("🎒 +Item: " .. c.Name .. " (" .. c.ClassName .. ")", C.Success, "INV")
-        end
-    end))
-    trackConn(bp.ChildRemoved:Connect(function(c)
-        if CFG.TrackBackpack and not State.paused and not State.destroyed then
-            addLog("🎒 -Item: " .. c.Name, C.Warning, "INV")
-        end
-    end))
-end
-
--- ============ WORKSPACE MODEL WATCH ============
+-- ============================================================
+-- SECTION: WORKSPACE MODEL WATCH (opt-in via toggle)
+-- ============================================================
 local function setupModelWatch()
     trackConn(workspace.DescendantAdded:Connect(function(obj)
         if not CFG.TrackModels or State.paused or State.destroyed then return end
@@ -1392,7 +1485,7 @@ local function setupModelWatch()
             addLog("📦 Model: " .. obj.Name, C.SubText, "MODEL")
         end)
     end))
-    -- reset budget setiap 5 detik
+    -- reset budget tiap 5 detik
     task.spawn(function()
         while not State.destroyed do
             task.wait(5)
@@ -1401,7 +1494,9 @@ local function setupModelWatch()
     end)
 end
 
--- ============ SILENT RESET LOOP ============
+-- ============================================================
+-- SECTION: SILENT RESET LOOP
+-- ============================================================
 task.spawn(function()
     while not State.destroyed do
         task.wait(2)
@@ -1421,7 +1516,9 @@ task.spawn(function()
     end
 end)
 
--- ============ BUTTON HANDLERS ============
+-- ============================================================
+-- SECTION: FOOTER BUTTON HANDLERS
+-- ============================================================
 btnPause.MouseButton1Click:Connect(function()
     State.paused = not State.paused
     btnPause.Text = State.paused and "RESUME" or "PAUSE"
@@ -1437,22 +1534,21 @@ btnClear.MouseButton1Click:Connect(function()
     btnClear.Text = "CLEAR"
 end)
 
--- 🔥 COPY ALL
+-- COPY ALL: dump semua log + remote + modul + attribute ke clipboard
 btnCopy.MouseButton1Click:Connect(function()
     local lines = {}
 
-    -- Header
     table.insert(lines, "===========================================")
     table.insert(lines, "   LIVE SCANNER v11.0 DUMP | @in666ar")
     table.insert(lines, "===========================================")
     table.insert(lines, "")
 
-    -- LOGS
+    -- [1] logs
     table.insert(lines, "=== [1] SCANNER LOGS ===")
     if #Logs.entries == 0 then table.insert(lines, "(No logs yet)") end
     for _, e in ipairs(Logs.entries) do table.insert(lines, e.text) end
 
-    -- INBOUND RemoteEvents
+    -- [2] inbound remote events
     table.insert(lines, "")
     table.insert(lines, "=== [2] REMOTE EVENTS (IN - OnClientEvent) ===")
     local evs = {}
@@ -1466,7 +1562,7 @@ btnCopy.MouseButton1Click:Connect(function()
     if #evs == 0 then table.insert(lines, "(None)") end
     for _, n in ipairs(evs) do table.insert(lines, "📡 " .. n) end
 
-    -- RemoteFunctions
+    -- [3] remote functions
     table.insert(lines, "")
     table.insert(lines, "=== [3] REMOTE FUNCTIONS (IN - InvokeServer) ===")
     local fns = {}
@@ -1480,7 +1576,7 @@ btnCopy.MouseButton1Click:Connect(function()
     if #fns == 0 then table.insert(lines, "(None)") end
     for _, n in ipairs(fns) do table.insert(lines, "📤 " .. n) end
 
-    -- OUTBOUND (FireServer)
+    -- [4] outbound
     table.insert(lines, "")
     table.insert(lines, "=== [4] OUTBOUND (FireServer — seen) ===")
     local outs = {}
@@ -1492,7 +1588,7 @@ btnCopy.MouseButton1Click:Connect(function()
     if #outs == 0 then table.insert(lines, "(None captured)") end
     for _, n in ipairs(outs) do table.insert(lines, "⬆ " .. n) end
 
-    -- Modules loaded
+    -- [5] modules
     table.insert(lines, "")
     table.insert(lines, "=== [5] MODULES LOADED (require) ===")
     local mods = {}
@@ -1501,7 +1597,7 @@ btnCopy.MouseButton1Click:Connect(function()
     if #mods == 0 then table.insert(lines, "(None)") end
     for _, n in ipairs(mods) do table.insert(lines, "📦 " .. n) end
 
-    -- Attributes
+    -- [6] attributes
     table.insert(lines, "")
     table.insert(lines, "=== [6] PLAYER ATTRIBUTES ===")
     local attrCount = 0
@@ -1518,13 +1614,17 @@ btnCopy.MouseButton1Click:Connect(function()
         text = string.sub(text, 1, CFG.ClipboardCap) .. "\n\n[TRUNCATED — exceeded " .. CFG.ClipboardCap .. " bytes]"
     end
 
-    local ok = pcall(function() setclipboard(text) end)
+    -- patch: fallback clipboard antar executor
+    local clip = setclipboard or toclipboard or (getgenv and getgenv().setclipboard)
+    local ok = clip and pcall(clip, text)
     btnCopy.Text = ok and "ALL COPIED!" or "FAIL"
     task.wait(1.5)
     btnCopy.Text = "COPY ALL"
 end)
 
--- ============ TAB HANDLER ============
+-- ============================================================
+-- SECTION: TAB HANDLER
+-- ============================================================
 for name, btn in pairs(tabButtons) do
     btn.MouseButton1Click:Connect(function()
         activeTab = name
@@ -1548,78 +1648,91 @@ for name, btn in pairs(tabButtons) do
     end)
 end
 
--- ============ BOOT ============
--- 1. install namecall hook FIRST (covers FireServer/InvokeServer/SetAttribute)
-installNamecallHook()
+-- ============================================================
+-- SECTION: BOOT (dibungkus pcall biar tidak crash total)
+-- ============================================================
+local bootOk, bootErr = pcall(function()
+    -- 1. namecall hook dulu (FireServer / InvokeServer / SetAttribute)
+    installNamecallHook()
 
--- 2. install require hook
-installRequireHook()
+    -- 2. require hook
+    installRequireHook()
 
--- 3. initial scan of existing remotes
-task.spawn(function()
-    local count = 0
-    for _, obj in ipairs(RS:GetDescendants()) do
-        if State.destroyed then break end
-        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-            if obj:IsA("RemoteEvent") then hookRemoteEvent(obj)
-            else hookRemoteFunction(obj) end
-            count = count + 1
-            if count % 50 == 0 then task.wait() end
+    -- 3. scan awal remote yang sudah ada
+    task.spawn(function()
+        local count = 0
+        for _, obj in ipairs(RS:GetDescendants()) do
+            if State.destroyed then break end
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                if obj:IsA("RemoteEvent") then hookRemoteEvent(obj)
+                else hookRemoteFunction(obj) end
+                count = count + 1
+                if count % 50 == 0 then task.wait() end
+            end
         end
-    end
+    end)
+
+    -- 4. pantau remote baru
+    setupDynamicRemoteWatch()
+
+    -- 5. player events + backpack
+    setupPlayerEvents()
+    setupBackpack()
+
+    -- 6. model watch (aktif kalau toggle ON)
+    setupModelWatch()
+
+    -- ========================================================
+    -- LOOPS
+    -- ========================================================
+    task.spawn(function()
+        while not State.destroyed do
+            task.wait(CFG.ScanInterval)
+            if not State.paused then pcall(scanOnce) end
+        end
+    end)
+
+    task.spawn(function()
+        while not State.destroyed do
+            task.wait(CFG.RenderInterval)
+            if activeTab == "LOG" then pcall(renderLog) end
+        end
+    end)
+
+    task.spawn(function()
+        while not State.destroyed do
+            task.wait(CFG.ButtonScanInterval)
+            if activeTab == "BTN" and CFG.TrackButtons then pcall(renderButtons) end
+        end
+    end)
+
+    task.spawn(function()
+        while not State.destroyed do
+            task.wait(CFG.InfoInterval)
+            if State.destroyed then break end
+            if activeTab == "INFO" then pcall(renderInfo) end
+            if activeTab == "GAME" then pcall(renderGame) end
+        end
+    end)
+
+    task.spawn(function()
+        while not State.destroyed do
+            task.wait(CFG.HookInterval)
+            if State.destroyed then break end
+            if activeTab == "HOOK" then pcall(renderHook) end
+        end
+    end)
+
+    -- ========================================================
+    -- INITIAL RENDER
+    -- ========================================================
+    renderLog(); renderInfo(); renderHook(); renderButtons(); renderGame()
+
+    addLog("🚀 v11.0 BIDIRECTIONAL — FireServer + InvokeServer + require + DescendantAdded ACTIVE", C.Success, "SYS")
+    print("⚡ [LiveScan v11.0 BIDIRECTIONAL] FireServer/InvokeServer/require hooks installed.")
 end)
 
--- 4. watch for new remotes
-setupDynamicRemoteWatch()
-
--- 5. player events + backpack
-setupPlayerEvents()
-setupBackpack()
-
--- 6. workspace model watch (opt-in via toggle)
-setupModelWatch()
-
--- ============ LOOPS ============
-task.spawn(function()
-    while not State.destroyed do
-        task.wait(CFG.ScanInterval)
-        if not State.paused then pcall(scanOnce) end
-    end
-end)
-
-task.spawn(function()
-    while not State.destroyed do
-        task.wait(CFG.RenderInterval)
-        if activeTab == "LOG" then pcall(renderLog) end
-    end
-end)
-
-task.spawn(function()
-    while not State.destroyed do
-        task.wait(CFG.ButtonScanInterval)
-        if activeTab == "BTN" and CFG.TrackButtons then pcall(renderButtons) end
-    end
-end)
-
-task.spawn(function()
-    while not State.destroyed do
-        task.wait(CFG.InfoInterval)
-        if State.destroyed then break end
-        if activeTab == "INFO" then pcall(renderInfo) end
-        if activeTab == "GAME" then pcall(renderGame) end
-    end
-end)
-
-task.spawn(function()
-    while not State.destroyed do
-        task.wait(CFG.HookInterval)
-        if State.destroyed then break end
-        if activeTab == "HOOK" then pcall(renderHook) end
-    end
-end)
-
--- ============ INITIAL RENDER ============
-renderLog(); renderInfo(); renderHook(); renderButtons(); renderGame()
-
-addLog("🚀 v11.0 BIDIRECTIONAL — FireServer + InvokeServer + require + DescendantAdded ACTIVE", C.Success, "SYS")
-print("⚡ [LiveScan v11.0 BIDIRECTIONAL] FireServer/InvokeServer/require hooks installed.")
+if not bootOk then
+    warn("[LiveScan] boot error: " .. tostring(bootErr))
+    pcall(addLog, "❌ boot error: " .. tostring(bootErr), C.Danger, "SYS")
+end
