@@ -1,14 +1,18 @@
 --[[
-    Script Name : LiveScanner_v11_patched.lua
+    Script Name : LiveScanner_v11.1_patched.lua
     Type        : Single-file Script
     Target Exec : Delta
-    Version     : Patch v1.0
+    Version     : Patch v1.1
     Function    : Live scanner bidirectional (FireServer/InvokeServer/OnClientEvent/require/SetAttribute),
                   GUI 6 tab (LOG, CFG, INFO, HOOK, BTN, GAME), auto-on, anti-spam, copy all, silent reset
-    Changelog   : fix vararg '...' di dalam pcall closure (script gagal compile), forward declaration
-                  renderLog/setupBackpack, dispatcher hook di-refresh tiap execute, setnamecallmethod restore,
-                  filter refresh + kategori PLAYER/MODEL, fmt typeof, backpack watch aman saat execute ulang,
-                  fallback clipboard, boot section dibungkus pcall. fitur/logika lain tidak diubah.
+    Changelog   : [v1.1] ignored remotes tidak lagi muncul di tab HOOK & COPY ALL
+                  renderGame field Name diperbaiki (tadinya nyontek PlaceId)
+                  cleanup CoreGui dibungkus pcall (aman di executor non-elevated)
+                  drag input.Changed no longer leaks connection tiap drag
+                  scanButtons keyword di-lowercase defensif
+                  dead code dibersihin: scanRemotes, isIgnoredEquipItem, CFG.IgnoreEquipItems,
+                  CFG.MaxJumpNormal, remoteStats[r].first, State.running, dead callback makeToggle
+                  (fitur/logika tidak diubah)
 ]]
 
 -- ============================================================
@@ -21,11 +25,13 @@ local UIS = game:GetService("UserInputService")
 local Stats = game:GetService("Stats")
 local lp = Players.LocalPlayer
 
--- cleanup guard: hapus instance lama kalau script di-execute ulang
+-- [PATCH] cleanup guard: CoreGui bisa di-restrict di executor tertentu, bungkus pcall
 if _G._LiveScanner_v10_Cleanup then pcall(_G._LiveScanner_v10_Cleanup) end
-for _, g in ipairs(game:GetService("CoreGui"):GetChildren()) do
-    if g.Name == "FullLiveScan" then g:Destroy() end
-end
+pcall(function()
+    for _, g in ipairs(game:GetService("CoreGui"):GetChildren()) do
+        if g.Name == "FullLiveScan" then g:Destroy() end
+    end
+end)
 for _, g in ipairs(lp:WaitForChild("PlayerGui"):GetChildren()) do
     if g.Name == "FullLiveScan" then g:Destroy() end
 end
@@ -63,13 +69,7 @@ local CFG = {
     IgnoreAttrPatterns = {
         "LBTHIncomeLastTick", "LastDailyReset", "_lemonade", "Presentation", "Internal", "Temp", "LastTick", "LastUpdate", "LastSync",
     },
-    IgnoreEquipItems = {
-        "Humanoid", "HumanoidRootPart", "Head", "Torso", "LowerTorso", "UpperTorso",
-        "RightUpperArm", "RightLowerArm", "RightHand", "LeftUpperArm", "LeftLowerArm", "LeftHand",
-        "RightUpperLeg", "RightLowerLeg", "RightFoot", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
-        "Health", "Animate", "Body Colors", "Shirt", "Pants", "Accessory",
-        "Right Arm", "Left Arm", "Right Leg", "Left Leg", "CharacterMesh",
-    },
+    -- [PATCH] IgnoreEquipItems dihapus (dead config, hanya dipakai isIgnoredEquipItem yang juga dihapus)
 
     ButtonKeywords = {
         "tap", "click", "arrow", "skill", "cast", "reel", "hook", "fish", "left", "right",
@@ -92,10 +92,12 @@ local CFG = {
     AlertKeywords = {"admin","kick","ban","give","cash","coin","token","prize","reward","hack","exploit","detected","victory"},
     CurrencyKeywords = {"cash","coin","gem","token","money","gold","credit","crystal","diamond","point","xp","level"},
     PatternKeywords = {"admin","give","set","hack","cheat","debug","test","backdoor","grant","unlock","free"},
-    MaxSpeedNormal = 100, MaxJumpNormal = 150,
+    MaxSpeedNormal = 100,
+    -- [PATCH] MaxJumpNormal dihapus (dead config, tidak pernah dibaca)
 }
 
-local State = {running = true, paused = false, destroyed = false}
+-- [PATCH] State.running dihapus (tidak pernah dibaca di mana pun)
+local State = {paused = false, destroyed = false}
 
 -- forward declaration (dipakai event handler sebelum fungsinya didefinisikan)
 local renderLog, setupBackpack
@@ -145,7 +147,7 @@ local Logs = {entries = {}, totalCount = 0, categoryCount = {}}
 
 local function pushLog(text, color, category)
     if State.destroyed then return end
-    category = category or "SYS" -- patch: default kategori biar categoryCount tidak error
+    category = category or "SYS"
     local entry = {
         text = "[" .. os.date("%H:%M:%S") .. "] " .. text,
         raw = text, color = color or Color3.fromRGB(200,200,200), category = category, time = os.clock(),
@@ -168,7 +170,7 @@ end
 local function fmt(v, depth)
     depth = depth or 0
     if depth > 3 then return "..." end
-    if typeof(v) == "Instance" then return v.Name end -- patch: type -> typeof (type() tidak pernah return "Instance")
+    if typeof(v) == "Instance" then return v.Name end
     if type(v) == "table" then
         local p = {}
         for k, val in pairs(v) do table.insert(p, tostring(k).."="..fmt(val, depth + 1)) end
@@ -195,12 +197,7 @@ local function isIgnoredName(name, patterns)
     return false
 end
 
-local function isIgnoredEquipItem(name)
-    for _, item in ipairs(CFG.IgnoreEquipItems) do
-        if name == item then return true end
-    end
-    return false
-end
+-- [PATCH] isIgnoredEquipItem dihapus (dead code, tidak pernah dipanggil)
 
 local function numAlmostEqual(a, b, tol)
     tol = tol or CFG.NumericTolerance
@@ -208,7 +205,6 @@ local function numAlmostEqual(a, b, tol)
     return math.abs(a - b) < tol
 end
 
--- addLog: tambah penanda alert kalau kena keyword
 local function addLog(text, color, category)
     if State.destroyed then return end
     if CFG.AlertMode then
@@ -289,7 +285,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, math.floor(14 * UI_SCALE))
 title.Position = UDim2.new(0, 0, 0, 3)
 title.BackgroundTransparency = 1
-title.Text = "⚡ LIVE SCAN v11.0"
+title.Text = "⚡ LIVE SCAN v11.1"
 title.TextColor3 = C.Accent
 title.Font = Enum.Font.GothamBold
 title.TextSize = TITLE_SIZE
@@ -355,10 +351,9 @@ closeBtn.MouseLeave:Connect(function() closeBtn.BackgroundColor3 = C.Danger end)
 collapse.MouseEnter:Connect(function() collapse.BackgroundColor3 = Color3.fromRGB(48, 54, 70) end)
 collapse.MouseLeave:Connect(function() collapse.BackgroundColor3 = C.RowBgAlt end)
 
--- fullKill: matikan semua loop, koneksi, dan GUI
 local function fullKill()
     State.destroyed = true
-    State.running = false
+    -- [PATCH] State.running dihapus (tidak pernah dibaca)
     disconnectAll()
     for r, conn in pairs(_G._LS_hooks or {}) do
         pcall(function()
@@ -447,7 +442,6 @@ filterBtn.AutoButtonColor = false
 filterBtn.Parent = searchFrame
 Instance.new("UICorner", filterBtn).CornerRadius = UDim.new(0, 5)
 
--- patch: tambah PLAYER & MODEL (kategori ini dipakai addLog tapi sebelumnya tidak bisa difilter)
 local filterCycle = {
     "ALL","REMOTE","OUT","RF","ATTR","STAT","HEALTH","SPEED","CURRENCY","PATTERN",
     "MODULE","EVENT","INV","TOOL","BTN","NET","ANOMALY","PLAYER","MODEL","SYS"
@@ -463,7 +457,7 @@ filterBtn.MouseButton1Click:Connect(function()
     filterIdx = filterIdx + 1
     if filterIdx > #filterCycle then filterIdx = 1 end
     filterBtn.Text = filterCycle[filterIdx]
-    renderLog() -- patch: refresh langsung saat filter diganti
+    renderLog()
 end)
 
 -- ============================================================
@@ -548,11 +542,17 @@ Instance.new("UICorner", btnCopy).CornerRadius = UDim.new(0, 6)
 -- SECTION: GUI - DRAG & COLLAPSE
 -- ============================================================
 local dragging, dragStart, startPos
+-- [PATCH] track input.Changed connection agar tidak leak tiap drag
+local dragInputConn = nil
 header.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
         dragging = true; dragStart = input.Position; startPos = frame.Position
-        input.Changed:Connect(function()
-            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        if dragInputConn then pcall(function() dragInputConn:Disconnect() end); dragInputConn = nil end
+        dragInputConn = input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+                if dragInputConn then pcall(function() dragInputConn:Disconnect() end); dragInputConn = nil end
+            end
         end)
     end
 end)
@@ -578,7 +578,7 @@ end)
 -- ============================================================
 -- SECTION: RENDER - LOG
 -- ============================================================
-function renderLog() -- assign ke forward declaration
+function renderLog()
     if State.destroyed then return end
     for _, c in ipairs(scroll:GetChildren()) do
         if c:IsA("TextLabel") then c:Destroy() end
@@ -657,11 +657,8 @@ local function makeToggle(name, key, parent, onChanged)
     toggleRefs[key] = btn
 end
 
-local resetSnapshotFuncs = {}
-
-makeToggle("Player Attributes", "TrackAttrs", cfgFrame, function(v)
-    if not v then for f in pairs(resetSnapshotFuncs.attrs or {}) do end end
-end)
+-- [PATCH] callback dead (resetSnapshotFuncs tidak pernah ada) dihapus, tidak mengubah behavior
+makeToggle("Player Attributes", "TrackAttrs", cfgFrame)
 makeToggle("Leaderstats", "TrackStats", cfgFrame)
 makeToggle("Humanoid", "TrackHumanoid", cfgFrame)
 makeToggle("Models Sekitar", "TrackModels", cfgFrame)
@@ -698,7 +695,7 @@ local function renderInfo()
         "Player: " .. lp.Name,
         "UserId: " .. lp.UserId,
         "Total logs: " .. tostring(Logs.totalCount),
-        "Scanner: AUTO-ON v11.0 (BIDIRECTIONAL)",
+        "Scanner: AUTO-ON v11.1 (BIDIRECTIONAL)",
         "--- Category Count ---",
     }
     for k, v in pairs(Logs.categoryCount) do
@@ -739,7 +736,8 @@ local function renderGame()
     end
     local data = {
         "🎮 GAME INFORMATION", "─────────────────────",
-        "Name: " .. game.PlaceId,
+        -- [PATCH] "Name:" tadinya nyontek game.PlaceId (misleading), sekarang pakai game.Name
+        "Name: " .. tostring(game.Name),
         "PlaceId: " .. game.PlaceId,
         "Players: " .. #Players:GetPlayers(), "",
         "👤 YOU", "─────────────────────",
@@ -785,8 +783,9 @@ local function renderHook()
         if c:IsA("TextLabel") then c:Destroy() end
     end
     local events, functions = {}, {}
-    for r in pairs(hookedRemotes) do
-        if typeof(r) == "Instance" then -- patch: guard biar aman kalau key bukan Instance
+    -- [PATCH] skip remote yang value-nya "IGNORED" agar tidak muncul di list
+    for r, v in pairs(hookedRemotes) do
+        if typeof(r) == "Instance" and v ~= "IGNORED" then
             if r:IsA("RemoteEvent") then table.insert(events, r.Name)
             elseif r:IsA("RemoteFunction") then table.insert(functions, r.Name) end
         end
@@ -901,7 +900,8 @@ local function hookRemoteEvent(r)
         return
     end
 
-    remoteStats[r] = {count = 0, first = os.clock(), timestamps = {}, skipped = 0, silent = false, lastHit = 0}
+    -- [PATCH] field 'first' dihapus (tidak pernah dibaca)
+    remoteStats[r] = {count = 0, timestamps = {}, skipped = 0, silent = false, lastHit = 0}
     remoteLastArgs[r] = nil
     remoteLastTime[r] = 0
 
@@ -913,7 +913,6 @@ local function hookRemoteEvent(r)
         local rs = remoteStats[r]
         rs.count = rs.count + 1
 
-        -- hitung frekuensi (anti-spam)
         local now = os.clock()
         rs.lastHit = now
         table.insert(rs.timestamps, now)
@@ -936,7 +935,6 @@ local function hookRemoteEvent(r)
         for _, a in ipairs(args) do argStr = argStr .. "|" .. fmt(a) end
         argStr = truncate(argStr, CFG.MaxArgLen)
 
-        -- dedupe argumen sama dalam window
         if CFG.DedupeRemote then
             if remoteLastArgs[r] == argStr and (now - (remoteLastTime[r] or 0)) < CFG.DedupeWindow then
                 rs.skipped = (rs.skipped or 0) + 1
@@ -950,7 +948,6 @@ local function hookRemoteEvent(r)
     end)
     hookedRemotes[r] = conn
 
-    -- pattern detect pada remote baru
     if CFG.PatternDetect then
         local low = string.lower(r.Name)
         for _, p in ipairs(CFG.PatternKeywords) do
@@ -1026,12 +1023,10 @@ local function hookRemoteFunction(r)
 end
 
 -- ============================================================
--- SECTION: UNIFIED NAMECALL HOOK (satu-satunya tempat hook namecall)
+-- SECTION: UNIFIED NAMECALL HOOK
 -- ============================================================
 local _lastSetAttrLog = 0
 local function installNamecallHook()
-    -- patch: dispatcher di-refresh tiap execute. hook asli cuma dipasang sekali (guard di bawah),
-    -- jadi tanpa ini hook lama masih nunjuk ke State/GUI lama yang sudah destroyed.
     _G._LS_onNamecall = function(self, method, args)
         if typeof(self) ~= "Instance" then return end
 
@@ -1056,21 +1051,19 @@ local function installNamecallHook()
         addLog("⚠️ hookmetamethod not available", C.Danger, "SYS")
         return
     end
-    if _G._LS_NamecallInstalled then return end -- guard anti double-hook
+    if _G._LS_NamecallInstalled then return end
     _G._LS_NamecallInstalled = true
 
     local oldNamecall
     oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
 
-        -- patch: '...' diambil di fungsi vararg ini (bukan di dalam closure pcall, itu bikin compile error)
         if method == "FireServer" or method == "InvokeServer" or method == "SetAttribute" then
             local dispatch = _G._LS_onNamecall
             if dispatch then
                 local args = {...}
                 pcall(dispatch, self, method, args)
             end
-            -- patch: dispatcher memanggil method lain (IsA dll) yang menimpa namecall method, kembalikan
             if setnamecallmethod then pcall(setnamecallmethod, method) end
         end
 
@@ -1079,12 +1072,11 @@ local function installNamecallHook()
 end
 
 -- ============================================================
--- SECTION: REQUIRE HOOK (satu-satunya tempat hook require)
+-- SECTION: REQUIRE HOOK
 -- ============================================================
 local function installRequireHook()
     local env = getgenv and getgenv() or _G
 
-    -- patch: dispatcher di-refresh tiap execute (flag _LS_require_hooked tetap dipakai)
     env._LS_onRequire = function(m)
         if CFG.TrackRequires and not State.paused and not State.destroyed then
             if typeof(m) == "Instance" then
@@ -1098,7 +1090,7 @@ local function installRequireHook()
     end
 
     local ok, err = pcall(function()
-        if env._LS_require_hooked then return end -- guard anti double-hook
+        if env._LS_require_hooked then return end
         env._LS_require_hooked = true
         local oldRequire = env.require or require
         env.require = function(m)
@@ -1113,17 +1105,9 @@ local function installRequireHook()
 end
 
 -- ============================================================
--- SECTION: REMOTE SCAN (initial + dynamic)
+-- SECTION: REMOTE SCAN (dynamic watch)
 -- ============================================================
-local function scanRemotes(parent, depth)
-    if depth > 6 then return end
-    for _, obj in ipairs(parent:GetChildren()) do
-        if State.destroyed then return end
-        if obj:IsA("RemoteEvent") then hookRemoteEvent(obj)
-        elseif obj:IsA("RemoteFunction") then hookRemoteFunction(obj) end
-        pcall(function() scanRemotes(obj, depth + 1) end)
-    end
-end
+-- [PATCH] scanRemotes() dihapus (dead function, initial scan sudah inline di boot)
 
 local function setupDynamicRemoteWatch()
     trackConn(RS.DescendantAdded:Connect(function(obj)
@@ -1157,19 +1141,19 @@ local function scanButtons()
                 local lowName = string.lower(name)
                 local lowText = string.lower(text)
 
-                -- blacklist
                 local isBlacklisted = false
                 for _, bl in ipairs(CFG.ButtonBlacklist) do
-                    if string.find(lowName, bl, 1, true) or string.find(lowText, bl, 1, true) then
+                    local blLow = string.lower(bl) -- [PATCH] defensive lowercase
+                    if string.find(lowName, blLow, 1, true) or string.find(lowText, blLow, 1, true) then
                         isBlacklisted = true; break
                     end
                 end
 
                 if not isBlacklisted then
-                    -- keyword match
                     local isTracked = false
                     for _, kw in ipairs(CFG.ButtonKeywords) do
-                        if string.find(lowName, kw, 1, true) or string.find(lowText, kw, 1, true) then
+                        local kwLow = string.lower(kw) -- [PATCH] defensive lowercase
+                        if string.find(lowName, kwLow, 1, true) or string.find(lowText, kwLow, 1, true) then
                             isTracked = true; break
                         end
                     end
@@ -1253,7 +1237,6 @@ local function scanOnce()
     local char = lp.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
 
-    -- attributes (LocalPlayer)
     if CFG.TrackAttrs then
         for k, v in pairs(lp:GetAttributes()) do
             if isIgnoredName(k, CFG.IgnoreAttrPatterns) then
@@ -1278,7 +1261,6 @@ local function scanOnce()
         end
     end
 
-    -- leaderstats
     if CFG.TrackStats then
         local ls = lp:FindFirstChild("leaderstats")
         if ls then
@@ -1294,7 +1276,6 @@ local function scanOnce()
         end
     end
 
-    -- currency radar
     if CFG.CurrencyRadar then
         local ls = lp:FindFirstChild("leaderstats")
         if ls then
@@ -1308,7 +1289,6 @@ local function scanOnce()
                 end
             end
         end
-        -- currency di attributes
         for k, v in pairs(lp:GetAttributes()) do
             if hasKwWord(k, CFG.CurrencyKeywords) and type(v) == "number" then
                 local old = lastSnapshot.currency["attr_"..k]
@@ -1320,7 +1300,6 @@ local function scanOnce()
         end
     end
 
-    -- humanoid
     if hum then
         if CFG.TrackHumanoid and lastSnapshot.walkspeed ~= hum.WalkSpeed then
             if lastSnapshot.walkspeed ~= nil and math.abs(hum.WalkSpeed - lastSnapshot.walkspeed) >= 1 then
@@ -1341,7 +1320,6 @@ local function scanOnce()
             end
         end
 
-        -- speedhack detect (throttled)
         if CFG.SpeedHackDetect and hum.WalkSpeed > CFG.MaxSpeedNormal then
             local now = os.clock()
             if now - lastSpeedWarn > CFG.SpeedWarnCooldown then
@@ -1351,7 +1329,6 @@ local function scanOnce()
         end
     end
 
-    -- tool equip
     if CFG.TrackToolEquip then
         local tool = char and char:FindFirstChildOfClass("Tool")
         local tname = tool and tool.Name or nil
@@ -1363,7 +1340,6 @@ local function scanOnce()
         end
     end
 
-    -- position tracking (teleport detection)
     if CFG.TrackPosition and char then
         local hrp = char:FindFirstChild("HumanoidRootPart")
         if hrp then
@@ -1378,7 +1354,6 @@ local function scanOnce()
         end
     end
 
-    -- network / ping
     if CFG.TrackNetwork then
         local pingItem = Stats.Network.ServerStatsItem and Stats.Network.ServerStatsItem["Data Ping"]
         if pingItem then
@@ -1393,7 +1368,6 @@ local function scanOnce()
         end
     end
 
-    -- nearby players
     if CFG.TrackPlayers then
         local near = {}
         for _, p in ipairs(Players:GetPlayers()) do
@@ -1425,11 +1399,9 @@ end
 -- ============================================================
 -- SECTION: BACKPACK WATCH
 -- ============================================================
--- token sesi: attribute _LS_watched dulu cuma boolean sehingga setelah execute ulang
--- backpack tidak pernah di-watch lagi (koneksi lama sudah di-disconnect)
 local SESSION_TOKEN = tostring(os.clock()) .. "-" .. tostring(math.random(100000, 999999))
 
-function setupBackpack() -- assign ke forward declaration
+function setupBackpack()
     local bp = lp:FindFirstChildOfClass("Backpack")
     if not bp then return end
     if bp:GetAttribute("_LS_watched") == SESSION_TOKEN then return end
@@ -1485,7 +1457,6 @@ local function setupModelWatch()
             addLog("📦 Model: " .. obj.Name, C.SubText, "MODEL")
         end)
     end))
-    -- reset budget tiap 5 detik
     task.spawn(function()
         while not State.destroyed do
             task.wait(5)
@@ -1534,12 +1505,11 @@ btnClear.MouseButton1Click:Connect(function()
     btnClear.Text = "CLEAR"
 end)
 
--- COPY ALL: dump semua log + remote + modul + attribute ke clipboard
 btnCopy.MouseButton1Click:Connect(function()
     local lines = {}
 
     table.insert(lines, "===========================================")
-    table.insert(lines, "   LIVE SCANNER v11.0 DUMP | @in666ar")
+    table.insert(lines, "   LIVE SCANNER v11.1 DUMP | @in666ar")
     table.insert(lines, "===========================================")
     table.insert(lines, "")
 
@@ -1548,12 +1518,12 @@ btnCopy.MouseButton1Click:Connect(function()
     if #Logs.entries == 0 then table.insert(lines, "(No logs yet)") end
     for _, e in ipairs(Logs.entries) do table.insert(lines, e.text) end
 
-    -- [2] inbound remote events
+    -- [2] inbound remote events — [PATCH] skip IGNORED
     table.insert(lines, "")
     table.insert(lines, "=== [2] REMOTE EVENTS (IN - OnClientEvent) ===")
     local evs = {}
-    for r in pairs(hookedRemotes) do
-        if typeof(r) == "Instance" and r:IsA("RemoteEvent") then
+    for r, v in pairs(hookedRemotes) do
+        if typeof(r) == "Instance" and v ~= "IGNORED" and r:IsA("RemoteEvent") then
             local ok, name = pcall(function() return r:GetFullName() end)
             if ok then table.insert(evs, name) end
         end
@@ -1562,12 +1532,12 @@ btnCopy.MouseButton1Click:Connect(function()
     if #evs == 0 then table.insert(lines, "(None)") end
     for _, n in ipairs(evs) do table.insert(lines, "📡 " .. n) end
 
-    -- [3] remote functions
+    -- [3] remote functions — [PATCH] skip IGNORED
     table.insert(lines, "")
     table.insert(lines, "=== [3] REMOTE FUNCTIONS (IN - InvokeServer) ===")
     local fns = {}
-    for r in pairs(hookedRemotes) do
-        if typeof(r) == "Instance" and r:IsA("RemoteFunction") then
+    for r, v in pairs(hookedRemotes) do
+        if typeof(r) == "Instance" and v ~= "IGNORED" and r:IsA("RemoteFunction") then
             local ok, name = pcall(function() return r:GetFullName() end)
             if ok then table.insert(fns, name) end
         end
@@ -1614,7 +1584,6 @@ btnCopy.MouseButton1Click:Connect(function()
         text = string.sub(text, 1, CFG.ClipboardCap) .. "\n\n[TRUNCATED — exceeded " .. CFG.ClipboardCap .. " bytes]"
     end
 
-    -- patch: fallback clipboard antar executor
     local clip = setclipboard or toclipboard or (getgenv and getgenv().setclipboard)
     local ok = clip and pcall(clip, text)
     btnCopy.Text = ok and "ALL COPIED!" or "FAIL"
@@ -1652,13 +1621,9 @@ end
 -- SECTION: BOOT (dibungkus pcall biar tidak crash total)
 -- ============================================================
 local bootOk, bootErr = pcall(function()
-    -- 1. namecall hook dulu (FireServer / InvokeServer / SetAttribute)
     installNamecallHook()
-
-    -- 2. require hook
     installRequireHook()
 
-    -- 3. scan awal remote yang sudah ada
     task.spawn(function()
         local count = 0
         for _, obj in ipairs(RS:GetDescendants()) do
@@ -1672,19 +1637,11 @@ local bootOk, bootErr = pcall(function()
         end
     end)
 
-    -- 4. pantau remote baru
     setupDynamicRemoteWatch()
-
-    -- 5. player events + backpack
     setupPlayerEvents()
     setupBackpack()
-
-    -- 6. model watch (aktif kalau toggle ON)
     setupModelWatch()
 
-    -- ========================================================
-    -- LOOPS
-    -- ========================================================
     task.spawn(function()
         while not State.destroyed do
             task.wait(CFG.ScanInterval)
@@ -1723,13 +1680,10 @@ local bootOk, bootErr = pcall(function()
         end
     end)
 
-    -- ========================================================
-    -- INITIAL RENDER
-    -- ========================================================
     renderLog(); renderInfo(); renderHook(); renderButtons(); renderGame()
 
-    addLog("🚀 v11.0 BIDIRECTIONAL — FireServer + InvokeServer + require + DescendantAdded ACTIVE", C.Success, "SYS")
-    print("⚡ [LiveScan v11.0 BIDIRECTIONAL] FireServer/InvokeServer/require hooks installed.")
+    addLog("🚀 v11.1 BIDIRECTIONAL — FireServer + InvokeServer + require + DescendantAdded ACTIVE", C.Success, "SYS")
+    print("⚡ [LiveScan v11.1 BIDIRECTIONAL] FireServer/InvokeServer/require hooks installed.")
 end)
 
 if not bootOk then
