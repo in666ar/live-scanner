@@ -1,6 +1,7 @@
 -- ============================================
--- FULL LIVE SCANNER v10.8 (ORIGINAL GUI) 
--- BACKEND PATCHED: Auto-ON, Anti-Spam, COPY ALL
+-- FULL LIVE SCANNER v11.0 (ORIGINAL GUI)
+-- FULL BIDIRECTIONAL: FireServer + InvokeServer + require + DescendantAdded
+-- BACKEND PATCHED: Auto-ON, Anti-Spam, COPY ALL, Silent Reset, All Toggles LIVE
 -- @in666ar
 -- ============================================
 
@@ -25,10 +26,19 @@ local CFG = {
     ScanInterval = 1.5, RenderInterval = 1.5, InfoInterval = 5, HookInterval = 5, ButtonScanInterval = 2,
     MaxLines = 25, MaxBuffer = 400, Radius = 100,
 
+    -- INBOUND (server -> client)
     TrackAttrs = true, TrackStats = true, TrackHumanoid = true,
-    TrackModels = false, 
-    TrackRemotes = true, TrackRemoteFunctions = true, TrackInventory = true, TrackPosition = false, TrackPlayers = true,
+    TrackModels = false,
+    TrackRemotes = true, TrackRemoteFunctions = true, TrackInventory = true,
+    TrackPosition = false, TrackPlayers = true,
     TrackHealth = true, TrackNetwork = false, TrackToolEquip = true, TrackButtons = true,
+
+    -- OUTBOUND (client -> server) — NEW TIER S
+    TrackOutbound = true,       -- FireServer hook
+    TrackGlobalAttr = false,    -- SetAttribute hook on all instances (noisy, opt-in)
+    TrackRequires = true,       -- require() hook
+    TrackPlayerEvents = true,   -- PlayerAdded/Removing/CharacterAdded
+    TrackBackpack = true,       -- Backpack + / - items
 
     AlertMode = true, CurrencyRadar = true, SpeedHackDetect = true, PatternDetect = true,
 
@@ -54,21 +64,35 @@ local CFG = {
         "tap", "click", "arrow", "skill", "cast", "reel", "hook", "fish", "left", "right",
         "up", "down", "power", "hit", "strike", "qte", "minigame", "ribbon", "doublecast", "execute", "reset",
     },
-
     ButtonBlacklist = {
         "buy", "close", "menu", "settings", "exit", "shop", "trade", "sell", "invite", "claim",
         "rod", "quest", "stats", "index", "store", "home", "back",
     },
 
-    SmartDiff = true, DedupeRemote = true, DedupeWindow = 3, 
+    SmartDiff = true, DedupeRemote = true, DedupeWindow = 3,
     NumericTolerance = 0.5, HighFreqThreshold = 8, HighFreqWindow = 3, MaxArgLen = 200,
+    SilentResetTime = 10,
+    SpeedWarnCooldown = 5,
+    SetAttrCooldown = 0.1,
+    ClipboardCap = 80000,
+    TeleportThreshold = 50,
+    ModelLogBudget = 20,
 
     AlertKeywords = {"admin","kick","ban","give","cash","coin","token","prize","reward","hack","exploit","detected","victory"},
     CurrencyKeywords = {"cash","coin","gem","token","money","gold","credit","crystal","diamond","point","xp","level"},
+    PatternKeywords = {"admin","give","set","hack","cheat","debug","test","backdoor","grant","unlock","free"},
     MaxSpeedNormal = 100, MaxJumpNormal = 150,
 }
 
 local State = {running = true, paused = false, destroyed = false}
+
+-- ============ CONNECTION TRACKER ============
+local _conns = {}
+local function trackConn(c) table.insert(_conns, c); return c end
+local function disconnectAll()
+    for _, c in ipairs(_conns) do pcall(function() c:Disconnect() end) end
+    _conns = {}
+end
 
 -- ============ 📱 AUTO-FIT ============
 local VIEW = workspace.CurrentCamera.ViewportSize
@@ -103,7 +127,7 @@ local function pushLog(text, color, category)
     if State.destroyed then return end
     local entry = {
         text = "[" .. os.date("%H:%M:%S") .. "] " .. text,
-        raw = text, color = color or Color3.fromRGB(200,200,200), category = category or "SYS", time = tick(),
+        raw = text, color = color or Color3.fromRGB(200,200,200), category = category or "SYS", time = os.clock(),
     }
     table.insert(Logs.entries, entry)
     if #Logs.entries > CFG.MaxBuffer then table.remove(Logs.entries, 1) end
@@ -173,7 +197,7 @@ local function addLog(text, color, category)
     pushLog(text, color, category or "SYS")
 end
 
--- ============ GUI (ORIGINAL) ============
+-- ============ GUI ============
 local C = {
     Bg          = Color3.fromRGB(16, 18, 24),
     BgTop       = Color3.fromRGB(26, 30, 40),
@@ -239,7 +263,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, math.floor(14 * UI_SCALE))
 title.Position = UDim2.new(0, 0, 0, 3)
 title.BackgroundTransparency = 1
-title.Text = "⚡ LIVE SCAN v10.8"
+title.Text = "⚡ LIVE SCAN v11.0"
 title.TextColor3 = C.Accent
 title.Font = Enum.Font.GothamBold
 title.TextSize = TITLE_SIZE
@@ -250,7 +274,7 @@ local watermark = Instance.new("TextLabel")
 watermark.Size = UDim2.new(1, 0, 0, math.floor(10 * UI_SCALE))
 watermark.Position = UDim2.new(0, 0, 0, math.floor(16 * UI_SCALE))
 watermark.BackgroundTransparency = 1
-watermark.Text = "@in666ar"
+watermark.Text = "@in666ar | bidir"
 watermark.TextColor3 = C.SubText
 watermark.Font = Enum.Font.GothamBold
 watermark.TextSize = math.max(7, math.floor(9 * UI_SCALE))
@@ -308,8 +332,11 @@ collapse.MouseLeave:Connect(function() collapse.BackgroundColor3 = C.RowBgAlt en
 local function fullKill()
     State.destroyed = true
     State.running = false
+    disconnectAll()
     for r, conn in pairs(_G._LS_hooks or {}) do
-        pcall(function() conn:Disconnect() end)
+        pcall(function()
+            if typeof(conn) == "RBXScriptConnection" then conn:Disconnect() end
+        end)
     end
     _G._LS_hooks = nil
     pcall(function() gui:Destroy() end)
@@ -389,7 +416,10 @@ filterBtn.AutoButtonColor = false
 filterBtn.Parent = searchFrame
 Instance.new("UICorner", filterBtn).CornerRadius = UDim.new(0, 5)
 
-local filterCycle = {"ALL","ATTR","STAT","REMOTE","RF","MODEL","INV","PLAYER", "HEALTH","CURRENCY","PATTERN","NET","ANOMALY","SYS","TOOL","BTN"}
+local filterCycle = {
+    "ALL","REMOTE","OUT","RF","ATTR","STAT","HEALTH","SPEED","CURRENCY","PATTERN",
+    "MODULE","EVENT","INV","TOOL","BTN","NET","ANOMALY","SYS"
+}
 local filterIdx = 1
 local searchText = ""
 
@@ -541,7 +571,8 @@ local function renderLog()
 end
 
 -- TOGGLE
-local function makeToggle(name, key, parent)
+local toggleRefs = {} -- for snapshot reset on toggle
+local function makeToggle(name, key, parent, onChanged)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, -4, 0, 24)
     row.BackgroundColor3 = C.RowBg
@@ -578,15 +609,22 @@ local function makeToggle(name, key, parent)
         CFG[key] = not CFG[key]
         btn.BackgroundColor3 = CFG[key] and C.Success or Color3.fromRGB(80, 40, 40)
         btn.Text = CFG[key] and "ON" or "OFF"
+        if onChanged then onChanged(CFG[key]) end
     end)
+    toggleRefs[key] = btn
 end
 
-makeToggle("Player Attributes", "TrackAttrs", cfgFrame)
+-- Snapshot reset helpers
+local resetSnapshotFuncs = {}
+
+makeToggle("Player Attributes", "TrackAttrs", cfgFrame, function(v)
+    if not v then for f in pairs(resetSnapshotFuncs.attrs or {}) do end end
+end)
 makeToggle("Leaderstats", "TrackStats", cfgFrame)
 makeToggle("Humanoid", "TrackHumanoid", cfgFrame)
 makeToggle("Models Sekitar", "TrackModels", cfgFrame)
-makeToggle("Remote Events", "TrackRemotes", cfgFrame)
-makeToggle("Remote Functions", "TrackRemoteFunctions", cfgFrame)
+makeToggle("Remote Events (IN)", "TrackRemotes", cfgFrame)
+makeToggle("Remote Functions (IN)", "TrackRemoteFunctions", cfgFrame)
 makeToggle("Inventory", "TrackInventory", cfgFrame)
 makeToggle("Position", "TrackPosition", cfgFrame)
 makeToggle("Track Players", "TrackPlayers", cfgFrame)
@@ -594,6 +632,11 @@ makeToggle("Track Health", "TrackHealth", cfgFrame)
 makeToggle("Track Network", "TrackNetwork", cfgFrame)
 makeToggle("Track Tool Equip", "TrackToolEquip", cfgFrame)
 makeToggle("Track UI Buttons", "TrackButtons", cfgFrame)
+makeToggle("🔥 FireServer (OUT)", "TrackOutbound", cfgFrame)
+makeToggle("🔥 require() Hook", "TrackRequires", cfgFrame)
+makeToggle("🔥 Global SetAttribute", "TrackGlobalAttr", cfgFrame)
+makeToggle("🔥 Player Events", "TrackPlayerEvents", cfgFrame)
+makeToggle("🔥 Backpack Watch", "TrackBackpack", cfgFrame)
 makeToggle("Alert Mode", "AlertMode", cfgFrame)
 makeToggle("Currency Radar", "CurrencyRadar", cfgFrame)
 makeToggle("SpeedHack Detect", "SpeedHackDetect", cfgFrame)
@@ -611,7 +654,7 @@ local function renderInfo()
         "Player: " .. lp.Name,
         "UserId: " .. lp.UserId,
         "Total logs: " .. tostring(Logs.totalCount),
-        "Scanner: AUTO-ON",
+        "Scanner: AUTO-ON v11.0 (BIDIRECTIONAL)",
         "--- Category Count ---",
     }
     for k, v in pairs(Logs.categoryCount) do
@@ -679,12 +722,14 @@ local function renderGame()
     end
 end
 
--- HOOK
+-- HOOK TAB
 _G._LS_hooks = _G._LS_hooks or {}
 local hookedRemotes = _G._LS_hooks
 local remoteStats = {}
+local outStats = {}
 local remoteLastArgs = {}
 local remoteLastTime = {}
+local seenModules = {}
 
 local function renderHook()
     if State.destroyed then return end
@@ -698,20 +743,22 @@ local function renderHook()
     end
     table.sort(events)
     table.sort(functions)
-    
+
     local hdr = Instance.new("TextLabel")
     hdr.Size = UDim2.new(1, -4, 0, math.max(13, FONT_SIZE + 3))
     hdr.BackgroundColor3 = C.RowBgAlt
     hdr.BackgroundTransparency = 0.2
-    hdr.Text = "  📡 Events: " .. #events .. " | 📤 Functions: " .. #functions
+    hdr.Text = "  📡 EV:" .. #events .. " | 📤 RF:" .. #functions .. " | ⬆ OUT:" .. (function()
+        local n=0; for _ in pairs(outStats) do n=n+1 end; return n
+    end)() .. " | 📦 MOD:" .. (function() local n=0; for _ in pairs(seenModules) do n=n+1 end; return n end)()
     hdr.TextColor3 = Color3.fromRGB(255, 130, 200)
     hdr.Font = Enum.Font.GothamBold
-    hdr.TextSize = FONT_SIZE + 1
+    hdr.TextSize = FONT_SIZE
     hdr.TextXAlignment = Enum.TextXAlignment.Left
     hdr.BorderSizePixel = 0
     hdr.Parent = hookFrame
     Instance.new("UICorner", hdr).CornerRadius = UDim.new(0, 4)
-    
+
     local hdrEv = Instance.new("TextLabel")
     hdrEv.Size = UDim2.new(1, -4, 0, math.max(12, FONT_SIZE + 1))
     hdrEv.BackgroundTransparency = 1
@@ -721,7 +768,7 @@ local function renderHook()
     hdrEv.TextSize = FONT_SIZE
     hdrEv.TextXAlignment = Enum.TextXAlignment.Left
     hdrEv.Parent = hookFrame
-    
+
     for _, txt in ipairs(events) do
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, -4, 0, math.max(12, FONT_SIZE + 1))
@@ -737,7 +784,7 @@ local function renderHook()
         lbl.Parent = hookFrame
         Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 3)
     end
-    
+
     local hdrFn = Instance.new("TextLabel")
     hdrFn.Size = UDim2.new(1, -4, 0, math.max(12, FONT_SIZE + 1))
     hdrFn.BackgroundTransparency = 1
@@ -747,7 +794,7 @@ local function renderHook()
     hdrFn.TextSize = FONT_SIZE
     hdrFn.TextXAlignment = Enum.TextXAlignment.Left
     hdrFn.Parent = hookFrame
-    
+
     for _, txt in ipairs(functions) do
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, -4, 0, math.max(12, FONT_SIZE + 1))
@@ -763,8 +810,38 @@ local function renderHook()
         lbl.Parent = hookFrame
         Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 3)
     end
+
+    -- Modules loaded
+    local hdrMod = Instance.new("TextLabel")
+    hdrMod.Size = UDim2.new(1, -4, 0, math.max(12, FONT_SIZE + 1))
+    hdrMod.BackgroundTransparency = 1
+    hdrMod.Text = "  ── Modules Loaded ──"
+    hdrMod.TextColor3 = Color3.fromRGB(180, 130, 255)
+    hdrMod.Font = Enum.Font.GothamBold
+    hdrMod.TextSize = FONT_SIZE
+    hdrMod.TextXAlignment = Enum.TextXAlignment.Left
+    hdrMod.Parent = hookFrame
+    local modList = {}
+    for k in pairs(seenModules) do table.insert(modList, k) end
+    table.sort(modList)
+    for _, txt in ipairs(modList) do
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -4, 0, math.max(12, FONT_SIZE + 1))
+        lbl.BackgroundColor3 = C.RowBg
+        lbl.BackgroundTransparency = 0.35
+        lbl.Text = "  📦 " .. txt
+        lbl.TextColor3 = Color3.fromRGB(200, 170, 255)
+        lbl.Font = Enum.Font.Code
+        lbl.TextSize = math.max(8, FONT_SIZE - 1)
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.TextTruncate = Enum.TextTruncate.AtEnd
+        lbl.BorderSizePixel = 0
+        lbl.Parent = hookFrame
+        Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 3)
+    end
 end
 
+-- ============ HOOK: INBOUND RemoteEvent ============
 local function hookRemoteEvent(r)
     if hookedRemotes[r] then return end
     if isIgnoredName(r.Name, CFG.IgnoreRemotes) or isIgnoredName(r.Name, CFG.IgnorePatterns) then
@@ -772,7 +849,7 @@ local function hookRemoteEvent(r)
         return
     end
 
-    remoteStats[r] = {count = 0, first = tick(), timestamps = {}, skipped = 0, silent = false}
+    remoteStats[r] = {count = 0, first = os.clock(), timestamps = {}, skipped = 0, silent = false, lastHit = 0}
     remoteLastArgs[r] = nil
     remoteLastTime[r] = 0
 
@@ -784,7 +861,8 @@ local function hookRemoteEvent(r)
         local rs = remoteStats[r]
         rs.count = rs.count + 1
 
-        local now = tick()
+        local now = os.clock()
+        rs.lastHit = now
         table.insert(rs.timestamps, now)
         while #rs.timestamps > 50 do table.remove(rs.timestamps, 1) end
         local recent = 0
@@ -795,7 +873,7 @@ local function hookRemoteEvent(r)
         if recent >= CFG.HighFreqThreshold then
             if not rs.silent then
                 rs.silent = true
-                addLog("🔇 AUTO-SILENT: "..r.Name, Color3.fromRGB(150, 150, 200), "SYS")
+                addLog("🔇 IN-SILENT: "..r.Name, Color3.fromRGB(150, 150, 200), "SYS")
             end
             rs.skipped = (rs.skipped or 0) + 1
             return
@@ -817,6 +895,70 @@ local function hookRemoteEvent(r)
         addLog("⬇ " .. r.Name .. " | " .. argStr, Color3.fromRGB(255, 130, 200), "REMOTE")
     end)
     hookedRemotes[r] = conn
+
+    -- Pattern detect on new remote
+    if CFG.PatternDetect then
+        local low = string.lower(r.Name)
+        for _, p in ipairs(CFG.PatternKeywords) do
+            if string.find(low, p, 1, true) then
+                addLog("🔍 Suspicious remote: " .. r.Name, C.Danger, "PATTERN")
+                break
+            end
+        end
+    end
+end
+
+-- ============ HOOK: OUTBOUND FireServer ============
+local function getOutStats(r)
+    if not outStats[r] then
+        outStats[r] = {count = 0, timestamps = {}, silent = false, lastHit = 0, lastArgs = nil, lastTime = 0}
+    end
+    return outStats[r]
+end
+
+local function onFireServer(r, args)
+    if not CFG.TrackOutbound or State.paused or State.destroyed then return end
+    if isIgnoredName(r.Name, CFG.IgnoreRemotes) or isIgnoredName(r.Name, CFG.IgnorePatterns) then return end
+
+    local rs = getOutStats(r)
+    local now = os.clock()
+    rs.count = rs.count + 1
+    rs.lastHit = now
+    table.insert(rs.timestamps, now)
+    while #rs.timestamps > 50 do table.remove(rs.timestamps, 1) end
+
+    local recent = 0
+    for _, t in ipairs(rs.timestamps) do
+        if now - t < CFG.HighFreqWindow then recent = recent + 1 end
+    end
+    if recent >= CFG.HighFreqThreshold then
+        if not rs.silent then
+            rs.silent = true
+            addLog("🔇 OUT-SILENT: " .. r.Name, Color3.fromRGB(150, 150, 200), "SYS")
+        end
+        return
+    end
+
+    local argStr = ""
+    for _, a in ipairs(args) do argStr = argStr .. "|" .. fmt(a) end
+    argStr = truncate(argStr, CFG.MaxArgLen)
+
+    if CFG.DedupeRemote and rs.lastArgs == argStr and (now - rs.lastTime) < CFG.DedupeWindow then
+        return
+    end
+    rs.lastArgs = argStr
+    rs.lastTime = now
+
+    addLog("⬆ " .. r.Name .. " | " .. argStr, Color3.fromRGB(255, 200, 50), "OUT")
+end
+
+-- ============ HOOK: RF InvokeServer ============
+local function onInvokeServer(r, args)
+    if not CFG.TrackRemoteFunctions or State.paused or State.destroyed then return end
+    if isIgnoredName(r.Name, CFG.IgnoreRemotes) or isIgnoredName(r.Name, CFG.IgnorePatterns) then return end
+    local argStr = ""
+    for _, a in ipairs(args) do argStr = argStr .. "|" .. fmt(a) end
+    addLog("📤 RF " .. r.Name .. " | " .. truncate(argStr, CFG.MaxArgLen), Color3.fromRGB(255, 150, 100), "RF")
 end
 
 local function hookRemoteFunction(r)
@@ -825,54 +967,103 @@ local function hookRemoteFunction(r)
         hookedRemotes[r] = "IGNORED"
         return
     end
-    
-    if hookmetamethod and getnamecallmethod and not _G._RF_HookInstalled then
-        _G._RF_HookInstalled = true
-        pcall(function()
-            local oldNamecall
-            oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-                local method = getnamecallmethod()
-                if method == "InvokeServer" and typeof(self) == "Instance" and self:IsA("RemoteFunction") then
-                    if not State.paused and CFG.TrackRemoteFunctions then
-                        if not isIgnoredName(self.Name, CFG.IgnoreRemotes) and not isIgnoredName(self.Name, CFG.IgnorePatterns) then
-                            local args = {...}
-                            local argStr = ""
-                            for _, a in ipairs(args) do argStr = argStr .. "|" .. fmt(a) end
-                            argStr = truncate(argStr, CFG.MaxArgLen)
-                            addLog("📤 RF " .. self.Name .. " | " .. argStr, Color3.fromRGB(255, 150, 100), "RF")
-                        end
-                    end
-                end
-                return oldNamecall(self, ...)
-            end)
-        end)
-    end
-    
     hookedRemotes[r] = "FUNCTION"
 end
 
+-- ============ UNIFIED NAMECALL HOOK ============
+local _lastSetAttrLog = 0
+local function installNamecallHook()
+    if not (hookmetamethod and getnamecallmethod) then
+        addLog("⚠️ hookmetamethod not available", C.Danger, "SYS")
+        return
+    end
+    if _G._LS_NamecallInstalled then return end
+    _G._LS_NamecallInstalled = true
+
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local method = getnamecallmethod()
+
+        if typeof(self) == "Instance" then
+            -- OUT: FireServer
+            if method == "FireServer" and self:IsA("RemoteEvent") then
+                local ok, err = pcall(function() onFireServer(self, {...}) end)
+                if not ok then end
+            -- OUT: InvokeServer
+            elseif method == "InvokeServer" and self:IsA("RemoteFunction") then
+                pcall(function() onInvokeServer(self, {...}) end)
+            -- Global SetAttribute (opt-in)
+            elseif method == "SetAttribute" and CFG.TrackGlobalAttr and not State.paused then
+                if self ~= lp and not self:IsDescendantOf(lp) then
+                    local now = os.clock()
+                    if now - _lastSetAttrLog > CFG.SetAttrCooldown then
+                        _lastSetAttrLog = now
+                        pcall(function()
+                            local attrName, attrVal = ...
+                            addLog("🏷 " .. self:GetFullName() .. "." .. tostring(attrName) .. " = " .. fmt(attrVal), C.Accent, "ATTR")
+                        end)
+                    end
+                end
+            end
+        end
+
+        return oldNamecall(self, ...)
+    end)
+end
+
+-- ============ REQUIRE HOOK ============
+local function installRequireHook()
+    local ok, err = pcall(function()
+        local env = getgenv and getgenv() or _G
+        if env._LS_require_hooked then return end
+        env._LS_require_hooked = true
+        local oldRequire = env.require or require
+        env.require = function(m)
+            if CFG.TrackRequires and not State.paused and not State.destroyed then
+                pcall(function()
+                    if typeof(m) == "Instance" then
+                        local path = m:GetFullName()
+                        if path and #path < 120 and not seenModules[path] then
+                            seenModules[path] = true
+                            addLog("📦 require: " .. path, Color3.fromRGB(180, 130, 255), "MODULE")
+                        end
+                    end
+                end)
+            end
+            return oldRequire(m)
+        end
+    end)
+    if not ok then
+        addLog("⚠️ require hook failed: " .. tostring(err), C.Danger, "SYS")
+    end
+end
+
+-- ============ INITIAL SCAN of remotes ============
 local function scanRemotes(parent, depth)
-    if depth > 4 then return end
+    if depth > 6 then return end
     for _, obj in ipairs(parent:GetChildren()) do
+        if State.destroyed then return end
         if obj:IsA("RemoteEvent") then hookRemoteEvent(obj)
         elseif obj:IsA("RemoteFunction") then hookRemoteFunction(obj) end
         pcall(function() scanRemotes(obj, depth + 1) end)
     end
 end
 
-task.spawn(function()
-    local count = 0
-    for _, obj in ipairs(RS:GetDescendants()) do
-        if State.destroyed then break end
-        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-            hookRemoteEvent(obj); hookRemoteFunction(obj)
-            count = count + 1
-            if count % 50 == 0 then task.wait() end
-        end
-    end
-end)
+-- ============ DYNAMIC REMOTE DETECTION ============
+local function setupDynamicRemoteWatch()
+    trackConn(RS.DescendantAdded:Connect(function(obj)
+        if State.destroyed then return end
+        task.defer(function()
+            if State.destroyed then return end
+            pcall(function()
+                if obj:IsA("RemoteEvent") then hookRemoteEvent(obj)
+                elseif obj:IsA("RemoteFunction") then hookRemoteFunction(obj) end
+            end)
+        end)
+    end))
+end
 
--- BUTTON SCANNER
+-- ============ BUTTON SCANNER ============
 local function scanButtons()
     local found = {}
     local pg = lp:FindFirstChild("PlayerGui")
@@ -882,20 +1073,20 @@ local function scanButtons()
             local skip = false
             if obj.AbsoluteSize.X < 10 or obj.AbsoluteSize.Y < 10 then skip = true end
             if obj.AbsolutePosition.X < 0 or obj.AbsolutePosition.Y < 0 then skip = true end
-            
+
             if not skip then
                 local name = obj.Name
                 local text = obj:IsA("TextButton") and obj.Text or ""
                 local lowName = string.lower(name)
                 local lowText = string.lower(text)
-                
+
                 local isBlacklisted = false
                 for _, bl in ipairs(CFG.ButtonBlacklist) do
                     if string.find(lowName, bl, 1, true) or string.find(lowText, bl, 1, true) then
                         isBlacklisted = true; break
                     end
                 end
-                
+
                 if not isBlacklisted then
                     local isTracked = false
                     for _, kw in ipairs(CFG.ButtonKeywords) do
@@ -903,7 +1094,7 @@ local function scanButtons()
                             isTracked = true; break
                         end
                     end
-                    
+
                     if isTracked then
                         table.insert(found, {instance = obj, name = name, text = text, size = obj.AbsoluteSize, position = obj.AbsolutePosition, class = obj.ClassName})
                     end
@@ -932,7 +1123,7 @@ local function renderButtons()
     hdr.BorderSizePixel = 0
     hdr.Parent = btnFrame
     Instance.new("UICorner", hdr).CornerRadius = UDim.new(0, 4)
-    
+
     for i, btn in ipairs(buttons) do
         if i > 30 then break end
         local lbl = Instance.new("TextLabel")
@@ -965,11 +1156,13 @@ local function renderButtons()
     end
 end
 
--- SNAPSHOT
+-- ============ SNAPSHOT ============
 local lastSnapshot = {attrs = {}, stats = {}, nearby = {}, inventory = {}, walkspeed = nil, jumppower = nil, seat = nil, position = nil, health = nil, ping = nil, tool = nil, currency = {}}
-local trackedPlayers = {}
+local lastSpeedWarn = 0
+local seenModelNames = {}
+local modelLogBudget = 0
 
--- CORE SCAN
+-- ============ CORE SCAN ============
 local function scanOnce()
     if State.destroyed or State.paused then return end
     if not gui or not gui.Parent then fullKill(); return end
@@ -977,6 +1170,7 @@ local function scanOnce()
     local char = lp.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
 
+    -- Attrs (LocalPlayer)
     if CFG.TrackAttrs then
         for k, v in pairs(lp:GetAttributes()) do
             if isIgnoredName(k, CFG.IgnoreAttrPatterns) then
@@ -1001,6 +1195,7 @@ local function scanOnce()
         end
     end
 
+    -- Leaderstats
     if CFG.TrackStats then
         local ls = lp:FindFirstChild("leaderstats")
         if ls then
@@ -1016,13 +1211,41 @@ local function scanOnce()
         end
     end
 
+    -- Currency Radar
+    if CFG.CurrencyRadar then
+        local ls = lp:FindFirstChild("leaderstats")
+        if ls then
+            for _, v in ipairs(ls:GetChildren()) do
+                if hasKwWord(v.Name, CFG.CurrencyKeywords) then
+                    local old = lastSnapshot.currency[v.Name]
+                    if old ~= nil and tostring(old) ~= tostring(v.Value) then
+                        addLog("💰 " .. v.Name .. ": " .. tostring(old) .. " → " .. tostring(v.Value), C.Success, "CURRENCY")
+                    end
+                    lastSnapshot.currency[v.Name] = v.Value
+                end
+            end
+        end
+        -- Also attrs currency
+        for k, v in pairs(lp:GetAttributes()) do
+            if hasKwWord(k, CFG.CurrencyKeywords) and type(v) == "number" then
+                local old = lastSnapshot.currency["attr_"..k]
+                if old ~= nil and old ~= v then
+                    addLog("💰 (attr) " .. k .. ": " .. tostring(old) .. " → " .. tostring(v), C.Success, "CURRENCY")
+                end
+                lastSnapshot.currency["attr_"..k] = v
+            end
+        end
+    end
+
+    -- Humanoid
     if hum then
         if CFG.TrackHumanoid and lastSnapshot.walkspeed ~= hum.WalkSpeed then
             if lastSnapshot.walkspeed ~= nil and math.abs(hum.WalkSpeed - lastSnapshot.walkspeed) >= 1 then
-                addLog("WalkSpeed: "..string.format("%.1f", lastSnapshot.walkspeed).." → "..string.format("%.1f", hum.WalkSpeed), Color3.fromRGB(255, 180, 100), "HEALTH")
+                addLog("WalkSpeed: "..string.format("%.1f", lastSnapshot.walkspeed).." → "..string.format("%.1f", hum.WalkSpeed), Color3.fromRGB(255, 180, 100), "SPEED")
             end
             lastSnapshot.walkspeed = hum.WalkSpeed
         end
+
         if CFG.TrackHealth then
             local hp = math.floor(hum.Health)
             if lastSnapshot.health ~= hp then
@@ -1034,11 +1257,18 @@ local function scanOnce()
                 lastSnapshot.health = hp
             end
         end
+
+        -- SpeedHack (throttled)
         if CFG.SpeedHackDetect and hum.WalkSpeed > CFG.MaxSpeedNormal then
-            addLog("⚡ SPEED WARN: "..math.floor(hum.WalkSpeed), Color3.fromRGB(255,200,50), "ANOMALY")
+            local now = os.clock()
+            if now - lastSpeedWarn > CFG.SpeedWarnCooldown then
+                lastSpeedWarn = now
+                addLog("⚡ SPEED WARN: "..math.floor(hum.WalkSpeed), Color3.fromRGB(255,200,50), "SPEED")
+            end
         end
     end
 
+    -- Tool Equip
     if CFG.TrackToolEquip then
         local tool = char and char:FindFirstChildOfClass("Tool")
         local tname = tool and tool.Name or nil
@@ -1049,9 +1279,149 @@ local function scanOnce()
             lastSnapshot.tool = tname
         end
     end
+
+    -- Position tracking (teleport detection)
+    if CFG.TrackPosition and char then
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local pos = hrp.Position
+            if lastSnapshot.position then
+                local dist = (pos - lastSnapshot.position).Magnitude
+                if dist > CFG.TeleportThreshold then
+                    addLog(string.format("📍 Teleport: %.0f studs", dist), C.Warning, "ANOMALY")
+                end
+            end
+            lastSnapshot.position = pos
+        end
+    end
+
+    -- Network / Ping
+    if CFG.TrackNetwork then
+        local pingItem = Stats.Network.ServerStatsItem and Stats.Network.ServerStatsItem["Data Ping"]
+        if pingItem then
+            local ok, ping = pcall(function() return pingItem:GetValue() end)
+            if ok and ping then
+                local lastPing = lastSnapshot.ping
+                if lastPing and math.abs(ping - lastPing) > 50 then
+                    addLog("📡 Ping: " .. math.floor(lastPing) .. " → " .. math.floor(ping) .. "ms", C.SubText, "NET")
+                end
+                lastSnapshot.ping = ping
+            end
+        end
+    end
+
+    -- Nearby players (TrackPlayers)
+    if CFG.TrackPlayers then
+        local near = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= lp and p.Character and char then
+                local a = p.Character:FindFirstChild("HumanoidRootPart")
+                local b = char:FindFirstChild("HumanoidRootPart")
+                if a and b then
+                    local dist = (a.Position - b.Position).Magnitude
+                    if dist <= CFG.Radius then
+                        near[p.Name] = math.floor(dist)
+                    end
+                end
+            end
+        end
+        for name, dist in pairs(near) do
+            if lastSnapshot.nearby[name] == nil then
+                addLog("👥 Near: " .. name .. " (" .. dist .. " studs)", C.Accent, "PLAYER")
+            end
+        end
+        for name in pairs(lastSnapshot.nearby) do
+            if near[name] == nil then
+                addLog("👋 Left radius: " .. name, C.SubText, "PLAYER")
+            end
+        end
+        lastSnapshot.nearby = near
+    end
 end
 
--- BUTTON HANDLERS
+-- ============ PLAYER EVENTS ============
+local function setupPlayerEvents()
+    trackConn(Players.PlayerAdded:Connect(function(p)
+        if CFG.TrackPlayerEvents and not State.paused and not State.destroyed then
+            addLog("👤 Join: " .. p.Name, C.Success, "EVENT")
+        end
+    end))
+    trackConn(Players.PlayerRemoving:Connect(function(p)
+        if CFG.TrackPlayerEvents and not State.paused and not State.destroyed then
+            addLog("👤 Leave: " .. p.Name, C.Warning, "EVENT")
+        end
+    end))
+    trackConn(lp.CharacterAdded:Connect(function(c)
+        if CFG.TrackPlayerEvents and not State.paused and not State.destroyed then
+            addLog("🎮 Character spawned: " .. c.Name, C.Accent, "EVENT")
+        end
+        task.wait(1)
+        setupBackpack()
+    end))
+end
+
+-- ============ BACKPACK WATCH ============
+local function setupBackpack()
+    local bp = lp:FindFirstChildOfClass("Backpack")
+    if not bp then return end
+    if bp:GetAttribute("_LS_watched") then return end
+    bp:SetAttribute("_LS_watched", true)
+    trackConn(bp.ChildAdded:Connect(function(c)
+        if CFG.TrackBackpack and not State.paused and not State.destroyed then
+            addLog("🎒 +Item: " .. c.Name .. " (" .. c.ClassName .. ")", C.Success, "INV")
+        end
+    end))
+    trackConn(bp.ChildRemoved:Connect(function(c)
+        if CFG.TrackBackpack and not State.paused and not State.destroyed then
+            addLog("🎒 -Item: " .. c.Name, C.Warning, "INV")
+        end
+    end))
+end
+
+-- ============ WORKSPACE MODEL WATCH ============
+local function setupModelWatch()
+    trackConn(workspace.DescendantAdded:Connect(function(obj)
+        if not CFG.TrackModels or State.paused or State.destroyed then return end
+        if not obj:IsA("Model") then return end
+        if modelLogBudget > CFG.ModelLogBudget then return end
+        task.defer(function()
+            if State.destroyed then return end
+            if seenModelNames[obj.Name] then return end
+            seenModelNames[obj.Name] = true
+            modelLogBudget = modelLogBudget + 1
+            addLog("📦 Model: " .. obj.Name, C.SubText, "MODEL")
+        end)
+    end))
+    -- reset budget setiap 5 detik
+    task.spawn(function()
+        while not State.destroyed do
+            task.wait(5)
+            modelLogBudget = 0
+        end
+    end)
+end
+
+-- ============ SILENT RESET LOOP ============
+task.spawn(function()
+    while not State.destroyed do
+        task.wait(2)
+        local now = os.clock()
+        for r, rs in pairs(remoteStats) do
+            if rs.silent and (now - (rs.lastHit or 0)) > CFG.SilentResetTime then
+                rs.silent = false
+                addLog("🔊 RESUME IN: " .. r.Name, Color3.fromRGB(150, 200, 150), "SYS")
+            end
+        end
+        for r, rs in pairs(outStats) do
+            if rs.silent and (now - (rs.lastHit or 0)) > CFG.SilentResetTime then
+                rs.silent = false
+                addLog("🔊 RESUME OUT: " .. r.Name, Color3.fromRGB(150, 200, 150), "SYS")
+            end
+        end
+    end
+end)
+
+-- ============ BUTTON HANDLERS ============
 btnPause.MouseButton1Click:Connect(function()
     State.paused = not State.paused
     btnPause.Text = State.paused and "RESUME" or "PAUSE"
@@ -1067,66 +1437,94 @@ btnClear.MouseButton1Click:Connect(function()
     btnClear.Text = "CLEAR"
 end)
 
--- 🔥 UPDATE: COPY ALL (LOG + HOOK + ATTR)
+-- 🔥 COPY ALL
 btnCopy.MouseButton1Click:Connect(function()
     local lines = {}
-    
-    -- 1. Header & LOGS
+
+    -- Header
     table.insert(lines, "===========================================")
-    table.insert(lines, "      LIVE SCANNER DUMP | @in666ar")
+    table.insert(lines, "   LIVE SCANNER v11.0 DUMP | @in666ar")
     table.insert(lines, "===========================================")
     table.insert(lines, "")
+
+    -- LOGS
     table.insert(lines, "=== [1] SCANNER LOGS ===")
     if #Logs.entries == 0 then table.insert(lines, "(No logs yet)") end
     for _, e in ipairs(Logs.entries) do table.insert(lines, e.text) end
-    
-    -- 2. HOOK (Events & Functions)
+
+    -- INBOUND RemoteEvents
     table.insert(lines, "")
-    table.insert(lines, "=== [2] REMOTE EVENTS (HOOK) ===")
+    table.insert(lines, "=== [2] REMOTE EVENTS (IN - OnClientEvent) ===")
     local evs = {}
     for r in pairs(hookedRemotes) do
-        if r:IsA("RemoteEvent") then 
+        if typeof(r) == "Instance" and r:IsA("RemoteEvent") then
             local ok, name = pcall(function() return r:GetFullName() end)
-            if ok then table.insert(evs, name) end 
+            if ok then table.insert(evs, name) end
         end
     end
     table.sort(evs)
     if #evs == 0 then table.insert(lines, "(None)") end
     for _, n in ipairs(evs) do table.insert(lines, "📡 " .. n) end
-    
+
+    -- RemoteFunctions
     table.insert(lines, "")
-    table.insert(lines, "=== [3] REMOTE FUNCTIONS (HOOK) ===")
+    table.insert(lines, "=== [3] REMOTE FUNCTIONS (IN - InvokeServer) ===")
     local fns = {}
     for r in pairs(hookedRemotes) do
-        if r:IsA("RemoteFunction") then 
+        if typeof(r) == "Instance" and r:IsA("RemoteFunction") then
             local ok, name = pcall(function() return r:GetFullName() end)
-            if ok then table.insert(fns, name) end 
+            if ok then table.insert(fns, name) end
         end
     end
     table.sort(fns)
     if #fns == 0 then table.insert(lines, "(None)") end
     for _, n in ipairs(fns) do table.insert(lines, "📤 " .. n) end
-    
-    -- 3. ATTRIBUTES
+
+    -- OUTBOUND (FireServer)
     table.insert(lines, "")
-    table.insert(lines, "=== [4] PLAYER ATTRIBUTES ===")
+    table.insert(lines, "=== [4] OUTBOUND (FireServer — seen) ===")
+    local outs = {}
+    for r, st in pairs(outStats) do
+        local ok, name = pcall(function() return r:GetFullName() end)
+        if ok then table.insert(outs, name .. " (count: " .. st.count .. ")") end
+    end
+    table.sort(outs)
+    if #outs == 0 then table.insert(lines, "(None captured)") end
+    for _, n in ipairs(outs) do table.insert(lines, "⬆ " .. n) end
+
+    -- Modules loaded
+    table.insert(lines, "")
+    table.insert(lines, "=== [5] MODULES LOADED (require) ===")
+    local mods = {}
+    for k in pairs(seenModules) do table.insert(mods, k) end
+    table.sort(mods)
+    if #mods == 0 then table.insert(lines, "(None)") end
+    for _, n in ipairs(mods) do table.insert(lines, "📦 " .. n) end
+
+    -- Attributes
+    table.insert(lines, "")
+    table.insert(lines, "=== [6] PLAYER ATTRIBUTES ===")
     local attrCount = 0
     for k, v in pairs(lp:GetAttributes()) do
         table.insert(lines, k .. " = " .. tostring(v))
         attrCount = attrCount + 1
     end
     if attrCount == 0 then table.insert(lines, "(None)") end
+
     table.insert(lines, "===========================================")
-    
-    -- EXECUTE COPY
+
     local text = table.concat(lines, "\n")
+    if #text > CFG.ClipboardCap then
+        text = string.sub(text, 1, CFG.ClipboardCap) .. "\n\n[TRUNCATED — exceeded " .. CFG.ClipboardCap .. " bytes]"
+    end
+
     local ok = pcall(function() setclipboard(text) end)
     btnCopy.Text = ok and "ALL COPIED!" or "FAIL"
     task.wait(1.5)
     btnCopy.Text = "COPY ALL"
 end)
 
--- TAB HANDLER
+-- ============ TAB HANDLER ============
 for name, btn in pairs(tabButtons) do
     btn.MouseButton1Click:Connect(function()
         activeTab = name
@@ -1137,11 +1535,11 @@ for name, btn in pairs(tabButtons) do
         btnFrame.Visible = name == "BTN"
         gameFrame.Visible = name == "GAME"
         searchFrame.Visible = name == "LOG"
-        
+
         for n, b in pairs(tabButtons) do
             b.BackgroundColor3 = n == name and C.TabActive or C.TabBar
         end
-        
+
         if name == "LOG" then renderLog()
         elseif name == "INFO" then renderInfo()
         elseif name == "HOOK" then renderHook()
@@ -1150,7 +1548,38 @@ for name, btn in pairs(tabButtons) do
     end)
 end
 
--- LOOPS
+-- ============ BOOT ============
+-- 1. install namecall hook FIRST (covers FireServer/InvokeServer/SetAttribute)
+installNamecallHook()
+
+-- 2. install require hook
+installRequireHook()
+
+-- 3. initial scan of existing remotes
+task.spawn(function()
+    local count = 0
+    for _, obj in ipairs(RS:GetDescendants()) do
+        if State.destroyed then break end
+        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+            if obj:IsA("RemoteEvent") then hookRemoteEvent(obj)
+            else hookRemoteFunction(obj) end
+            count = count + 1
+            if count % 50 == 0 then task.wait() end
+        end
+    end
+end)
+
+-- 4. watch for new remotes
+setupDynamicRemoteWatch()
+
+-- 5. player events + backpack
+setupPlayerEvents()
+setupBackpack()
+
+-- 6. workspace model watch (opt-in via toggle)
+setupModelWatch()
+
+-- ============ LOOPS ============
 task.spawn(function()
     while not State.destroyed do
         task.wait(CFG.ScanInterval)
@@ -1189,5 +1618,8 @@ task.spawn(function()
     end
 end)
 
+-- ============ INITIAL RENDER ============
 renderLog(); renderInfo(); renderHook(); renderButtons(); renderGame()
-print("⚡ [LiveScan v10.8 PATCHED] COPY ALL Activated!")
+
+addLog("🚀 v11.0 BIDIRECTIONAL — FireServer + InvokeServer + require + DescendantAdded ACTIVE", C.Success, "SYS")
+print("⚡ [LiveScan v11.0 BIDIRECTIONAL] FireServer/InvokeServer/require hooks installed.")
